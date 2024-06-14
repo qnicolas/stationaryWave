@@ -1,2 +1,4 @@
 oldTingModel/
 .ipynb_checkpoints/
+*initial.py
+__pycache__/

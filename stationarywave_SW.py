@@ -83,6 +83,9 @@ u  =  dist.VectorField(coords,name='u'  , bases=full_basis)
 # Bottom topography
 hbottom  =  dist.Field(name='hbottom'  , bases=full_basis)
 
+# Heating
+Q  =  dist.Field(name='Q'  , bases=full_basis)
+
 # Define an operator: cross product by zhat times sin(latitude) (for Coriolis force)
 zcross = lambda A: d3.MulCosine(d3.skew(A))
 
@@ -92,16 +95,22 @@ phi, theta = dist.local_grids(full_basis)
 lat = np.pi / 2 - theta + 0*phi
 lon = phi-np.pi
 
-# define the basic-state wind and height, as well as the topography
-# Note that these should be balanced: fk x U +  U.grad(U) = -g*grad(H) and div(H*U)=0
 lat0 = np.pi/4
 deltalat = np.pi/20
 lon0 = 0.
 deltalon = np.pi/20
 
-U0 = 20 * (meter/second)
+
+# # Imposed heating
+# Q0 = - 10. * meter/day 
+# Q['g'] = Q0 * np.exp(-(lat)**2/(2*deltalat**2)) * np.exp(-(lon)**2/(2*deltalon**2))
+
+# define the basic-state wind and height, as well as the topography
+# Note that these should be balanced: fk x U +  U.grad(U) = -g*grad(H) and div(H*U)=0
+U0    = 20 * (meter/second)
+hbot0 = 5e2 * meter 
 U['g'][0] = np.exp(-(lat[0]-lat0)**2/(2*deltalat**2)) * U0 #lat[0] because it lives on the zonal basis
-hbottom['g'] = np.exp(-(lat-lat0)**2/(2*deltalat**2)) * np.exp(-(lon-lon0)**2/(2*deltalon**2)) * 5e2 * meter 
+hbottom['g'] = np.exp(-(lat-lat0)**2/(2*deltalat**2)) * np.exp(-(lon-lon0)**2/(2*deltalon**2)) * hbot0
 
 # Balanced height field: solve a quick linear boundary value problem
 c = dist.Field(name='c')# a constant
@@ -112,6 +121,8 @@ problem.add_equation("ave(H) = H0")
 solver = problem.build_solver()
 solver.solve()
 
+
+    
 #########################################
 ############# SETUP PROBLEM #############
 #########################################
@@ -119,24 +130,27 @@ problem = d3.IVP([u, h], namespace=locals())
 
 if(lhs):
     problem.add_equation("dt(u) + g*grad(h) + 2*Omega*zcross(u) + epsilon*u + nu*lap(lap(u)) + U@grad(u) + u@grad(U) = - g*grad(hbottom)")
-    problem.add_equation("dt(h) + epsilon*h + nu*lap(lap(h)) + div(U*h) + div(u*H) = -div(U*hbottom) ") #- div(u*hbottom) term ignored but could be included, would have to be on RHS
+    problem.add_equation("dt(h) + epsilon*h + nu*lap(lap(h)) + div(U*h) + div(u*H) = Q ")
 else:
     problem.add_equation("dt(u) + g*grad(h) + 2*Omega*zcross(u) + epsilon*u + nu*lap(lap(u))  = - g*grad(hbottom) -(U@grad(u) + u@grad(U))")
-    problem.add_equation("dt(h) + epsilon*h + nu*lap(lap(h))  = -(div(U*h) + div(u*H) + div(U*hbottom))")#- div(u*hbottom) term ignored but could be included, would have to be on RHS
+    problem.add_equation("dt(h) + epsilon*h + nu*lap(lap(h))  = -(div(U*h) + div(u*H)) + Q")
 
 
 # Solver (integrates in time using a Runge Kutta method)
 solver = problem.build_solver(d3.RK222)
 solver.stop_sim_time = stop_sim_time
 
+
 # Where and when to write output
 snapshots = solver.evaluator.add_file_handler(SNAPSHOTS_DIR+snapshot_id, sim_dt=6*hour,mode='overwrite')
-# What to write : u,h (that's solver.state) and vorticity (-d3.div(d3.skew(u)))
+# What to write : u,h (that's solver.state), vorticity (-d3.div(d3.skew(u))), divergence, basic state
 snapshots.add_tasks(solver.state)
 snapshots.add_task(-d3.div(d3.skew(u)), name='zeta')
+snapshots.add_task(d3.div(u), name='div')
 snapshots.add_task(U, name='U')
 snapshots.add_task(H, name='H')
 snapshots.add_task(hbottom, name='hbottom')
+
 
 ########################################
 ############ MAIN TIME LOOP ############

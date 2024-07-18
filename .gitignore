@@ -2,3 +2,4 @@ oldTingModel/
 .ipynb_checkpoints/
 *initial.py
 __pycache__/
+minimalexample.py

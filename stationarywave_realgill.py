@@ -1,21 +1,21 @@
-#######################################################################################
-######### Sigma-level stationary wave model on the sphere                     #########
-######### Inspired from Ting & Yu (1998, JAS).                                #########
-######### Model has a variable number of sigma levels (N)                     #########
-######### and uses spherical harmonics in the horizontal.                     #########
-######### Prognostic variables are horizontal velocity at each level (u,v)_i, #########
-######### temperature T_i, and perturbation-log-surface-pressure lnps.        #########
-#########                                                                     #########
-######### For now, the model is linear (nonlinear extension would be quite    #########
-######### straightforward, contact qnicolas@berkeley.edu)                     #########
-#########                                                                     #########
-######### A steady-state should be reached after a few days of integration.   #########
-#########                                                                     #########
-######### To run: change SNAPSHOTS_DIR, then                                  #########
-######### mpiexec -n {number of cores} python stationarywave.py {0 or 1}      #########
-######### the last argument stands for restart (0 for initial run, 1 for      #########
-######### restart run)                                                        #########
-#######################################################################################
+###########################################################################################
+######### Sigma-level stationary wave model on the sphere                         #########
+######### Inspired from Ting & Yu (1998, JAS).                                    #########
+######### Model has a variable number of sigma levels (N)                         #########
+######### and uses spherical harmonics in the horizontal.                         #########
+######### Prognostic variables are horizontal velocity at each level (u,v)_i,     #########
+######### temperature T_i, and perturbation-log-surface-pressure lnps.            #########
+#########                                                                         #########
+######### For now, the model is linear (nonlinear extension would be quite        #########
+######### straightforward, contact qnicolas@berkeley.edu)                         #########
+#########                                                                         #########
+######### A steady-state should be reached after a few days of integration.       #########
+#########                                                                         #########
+######### To run: change SNAPSHOTS_DIR, then                                      #########
+######### mpiexec -n {number of cores} python stationarywave_realgill.py {0 or 1} #########
+######### the last argument stands for restart (0 for initial run, 1 for          #########
+######### restart run)                                                            #########
+###########################################################################################
 
 
 import numpy as np
@@ -28,6 +28,8 @@ import os;import shutil;from pathlib import Path
 SNAPSHOTS_DIR = "/pscratch/sd/q/qnicolas/stationarywave_snapshots/"
 import warnings; import sys
 
+import xarray as xr
+
 #########################################
 ######### Simulation Parameters #########
 #########################################
@@ -36,8 +38,8 @@ import warnings; import sys
 Nphi = 64; Ntheta = 32; resolution='T32'
 
 # Number of sigma levels
-N = 12 # 12 in Ting&Yu 1998
-zonal_basic_state=False
+N = 12 #in Ting&Yu 1998
+zonal_basic_state=True
 
 
 # Dealiasing factor indicates how many grid points to use in physical space 
@@ -63,9 +65,9 @@ timestep = 400*second
 if not restart:
     stop_sim_time = 5*day 
 else:
-    stop_sim_time = 10*day
+    stop_sim_time = 20*day
 
-snapshot_id = 'stationarywave_%ilevel_%s_gill'%(N,resolution)
+snapshot_id = 'stationarywave_%ilevel_%s_realgill'%(N,resolution)
 
 #########################################
 ########## PHYSICAL PARAMETERS ##########
@@ -158,46 +160,38 @@ if zonal_basic_state:
 else:
     latzonal=lat
     
-# Basic-state temperature
-T0 = 290.*Kelvin
-Gamma = 7. * Kelvin / (1e3 * meter)
-for i in range(N):
-    Tbars[i]['g'] = T0 * sigma[i] ** (Rd*Gamma/g) # hydrostatic profile with constant lapse rate
+sigma_full_xr = xr.DataArray(np.arange(1,N)/N,coords={'sigma':np.arange(1,N)/N},dims=['sigma'])
+basicstate_halflevs = xr.open_dataset("era5_basicstate_interp.nc")
+basicstate_halflevs = basicstate_halflevs.reindex(latitude=list(reversed(basicstate_halflevs.latitude)))
+basicstate_fulllevs = basicstate_halflevs.interp_like(sigma_full_xr)
 
-# Basic-state sigma velocity
-for i in range(N-1):
-    sigmadotbars[i]['g'] = 0.
-
-
-# Basic-state wind and log-surface pressure: From horizontal momentum balance, f ubar_i = -R Tbar_i d(lnpsbar)/dy (temperature is horizontally uniform, hence no geopotential gradients).
-U0 = 0. * (meter/second)
-lat0 = np.pi/4
-deltalat = np.pi/20
-Uprof = np.exp(-(latzonal-lat0)**2/(2*deltalat**2)) * U0
-
-f = 2 * Omega * np.sin(latzonal)
-f0 = 2 * Omega * np.sin(lat0)
-
-for i in range(N):
-    ubars[i]['g'][0] = Uprof * (Tbars[i]['g'] / T0) * (f0 / f) * (latzonal>np.pi/10) #Defined this way so that d(lnpsbar)/dy = - f ubar_i / (R Tbar_i)  = constant * np.exp(-(lat-lat0)**2/(2*deltalat**2))
     
-from scipy.special import erf
-lnpsbar['g'] = -R0 * f0/(Rd*T0) * U0 * np.sqrt(np.pi/2) * deltalat * (1 + erf((latzonal - lat0)/(np.sqrt(2)*deltalat)))
+# Basic-state temperature, wind
+for i in range(N):
+    ubars[i].load_from_global_grid_data(np.stack([ basicstate_halflevs.U.isel(sigma=i).data, 
+                                                  -basicstate_halflevs.V.isel(sigma=i).data
+                                                 ]).reshape(2,1,-1)*(meter/second))
+    Tbars[i].load_from_global_grid_data(basicstate_halflevs.T.isel(sigma=i).data.reshape(1,-1)*Kelvin)
 
+# Basic-state log-surface pressure
+lnpsbar.load_from_global_grid_data(np.log(basicstate_halflevs.SP.data.reshape(1,-1)/1e5))
+
+# Basic-state sigmadot (omega/ps - sigma * u.grad(lnps))
+sigmadot_1 = basicstate_fulllevs.W/basicstate_fulllevs.SP * 1/second
+for i in range(N-1):
+    sigmadotbars[i].load_from_global_grid_data(sigmadot_1.isel(sigma=i).data.reshape(1,-1))
+    sigma_full_i = (i+1)/N
+    sigmadotbars[i] = sigmadotbars[i]-sigma_full_i*(ubars[i]+ubars[i+1])@d3.grad(lnpsbar)/2
 
 # Topographic forcing
-H0 = 0. * meter
-lon0 = 0.
-deltalon = np.pi/20
-Phisfc['g'] = np.exp(-(lat-lat0)**2/(2*deltalat**2)) * np.exp(-(lon-lon0)**2/(2*deltalon**2)) * H0 * g
+Phisfc['g'] = 0.
  
-
 # Heating forcing
-Q0 = 1. * Kelvin / day
+Q0 = 2. * Kelvin / day
 for i in range(N):
-    Qdiabs[i]['g'] = Q0 * np.exp(-(sigma[i]-0.5)**2/(2*0.1**2)) * np.exp(-(lat)**2/(2*deltalat**2)) * np.exp(-(lon)**2/(2*deltalon**2))
-    
-
+    deltalat = 10 * np.pi/180
+    deltalon = 35 * np.pi/180
+    Qdiabs[i]['g'] = Q0 * np.sin(np.pi * sigma[i]) * np.pi/2 * np.cos(np.pi * lat / (2 * deltalat))**2 * np.cos(np.pi * lon / (2 * deltalon))**2 * (np.abs(lat)<deltalat) * (np.abs(lon)<deltalon)
    
     
 ###################################################
@@ -293,7 +287,7 @@ else:
 ########### SETUP OUTPUT & RUN ###########
 ##########################################
 # Save snapshots every 6h of model time
-snapshots = solver.evaluator.add_file_handler(SNAPSHOTS_DIR+snapshot_id, sim_dt=6*hour,mode=file_handler_mode)
+snapshots = solver.evaluator.add_file_handler(SNAPSHOTS_DIR+snapshot_id, sim_dt=1*hour,mode=file_handler_mode)
 
 # Add all state variables to snapshots
 snapshots.add_tasks(solver.state)
@@ -339,10 +333,9 @@ for i in range(N):
     snapshots.add_task(Tbars[i], name=Tbar_names[i])
     if not zonal_basic_state: #otherwise a bug in Dedalus prevents us from outputting Qdiab for now
         snapshots.add_task(Qdiabs[i], name=Qdiab_names[i])
-#for i in range(N-1):
-#    snapshots.add_task(sigmadotbars[i], name=sigmadotbar_names[i])   
-
-
+for i in range(N-1):
+    snapshots.add_task(sigmadotbars[i], name=sigmadotbar_names[i])   
+    
 # Main loop
 with warnings.catch_warnings():
     warnings.filterwarnings('error',category=RuntimeWarning)

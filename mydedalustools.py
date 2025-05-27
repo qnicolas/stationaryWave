@@ -87,18 +87,20 @@ def concat_levels(ds,N):
 ########################  HELMHOLTZ DECOMPOSITION  ############################
 ################################################################
 
-def calc_helmholtz(u_xr,R0=1):
+def calc_helmholtz(u_xr):
     """Calculates a streamfunction and Helmholtz decomposition on dedalus output
     Here the streamfunction psi is defined such that laplacian(psi) = curl(u)
     args:
         - u_xr: xarray.DataArray, that comes from the output of a dedalus simulation
         (opened using open_h5s and concat_levels).
         Note u should not depend on time, and should be nondimensional.
-        - R0: float, nondimensional earth radius
     returns:
         - xarray.Dataset with four variables: u_rot (rotational part of u), 
         u_div (divergent part of u), div (divergence of u), and psi (streamfunction)
     """
+    meter = 1 / 6.37122e6 # To perform the numerical calculation, we rescale all lengths by Earth's radius 
+    second = 1.
+
     dealias = (3/2,3/2)
     dtype = np.float64
     Nphi = len(u_xr.longitude)
@@ -106,7 +108,7 @@ def calc_helmholtz(u_xr,R0=1):
     
     coords = d3.S2Coordinates('phi', 'theta')
     dist = d3.Distributor(coords, dtype=dtype)
-    basis = d3.SphereBasis(coords, (Nphi, Ntheta), radius=R0, dealias=dealias, dtype=dtype)
+    basis = d3.SphereBasis(coords, (Nphi, Ntheta), radius=6.37122e6 * meter, dealias=dealias, dtype=dtype)
     
     # placeholder for u_rot and u_div
     u_xr = u_xr.transpose('','longitude','latitude','sigma')
@@ -118,7 +120,7 @@ def calc_helmholtz(u_xr,R0=1):
     for i in range(len(u_xr.sigma)):
         u = dist.VectorField(coords, name='u', bases=basis)
         u_rot = dist.VectorField(coords, name='u_rot', bases=basis)
-        u.load_from_global_grid_data(u_xr.isel(sigma=i).data)
+        u.load_from_global_grid_data(u_xr.isel(sigma=i).data * meter / second)
         
         c = dist.Field(name='c')
         psi = dist.Field(name='psi', bases=basis)
@@ -141,6 +143,9 @@ def calc_helmholtz(u_xr,R0=1):
         u_div_xr[:,:,:,i] = u['g']-u_rot['g']
         divu_xr[:,:,i] = divu['g']
         
-    return xr.merge((u_rot_xr,u_div_xr,psi_xr,divu_xr)).transpose('','latitude','longitude','sigma')
+    return xr.merge((u_rot_xr / (meter/second), 
+                     u_div_xr / (meter/second),
+                     psi_xr / (meter**2 / second),
+                     divu_xr / (1/second))).transpose('','latitude','longitude','sigma')
         
     

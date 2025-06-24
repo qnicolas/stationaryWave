@@ -1,13 +1,12 @@
 import numpy as np
 import xarray as xr
 from scipy.integrate import cumulative_trapezoid
-from stationarywave import StationaryWaveProblem, consts
+from stationarywave import StationaryWaveProblem
 
-sph_resolution = 32; Nsigma = 12; linear = True; zonal_basic_state = False
-output_dir = "data/"; case_name = "idealgill"
+sph_resolution = 32; Nsigma = 12; linear = True; zonal_basic_state = True
+output_dir = "/net/helium/atmosdyn/qnicolas/stationarywave_snapshots/"; case_name = "idealgill"
 
 idealgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, hyperdiffusion_coefficient=40e15)
-idealgill_linear.setup_problem()
 
 ###################################################
 ############ INITIALIZE BASIC STATE ###############
@@ -22,10 +21,13 @@ xr_structure = xr.DataArray(np.ones((len(sigma_half), len(lat), len(lon))),
 # Basic-state temperature
 T0 = 290. # surface temperature in Kelvin
 Gamma = 7e-3 # lapse rate in Kelvin/meter
-Tbar = T0 * xr_structure.sigma_half ** (consts['Rd']*Gamma/consts['g']) * xr_structure  # hydrostatic profile with constant lapse rate
+Rd = 287.; g = 9.81; Omega = 2*np.pi/86400
+Tbar = T0 * xr_structure.sigma_half ** (Rd*Gamma/g) * xr_structure  # hydrostatic profile with constant lapse rate
 
-# Basic-state V, W
+# Basic-state V
 Vbar = 0. * xr_structure
+
+# Basic-state W
 sigma_full = (np.arange(1,Nsigma)) / Nsigma
 Wbar = xr.DataArray(np.zeros((len(sigma_full), len(lat), len(lon))),
                     coords={'sigma_full': sigma_full, 'lat': lat, 'lon': lon},
@@ -37,7 +39,7 @@ Wbar = xr.DataArray(np.zeros((len(sigma_full), len(lat), len(lon))),
 # Note that this must be valid at all levels, hence ubar / T must not vary in the vertical.
 
 Ubar = 0. * xr_structure
-# Gaussian jet profile
+# # Gaussian jet profile
 # lat0 = 45.
 # deltalat = 10.
 # Ubar = 10. * np.exp(-(xr_structure.lat-lat0)**2/(2*deltalat**2)) * xr_structure
@@ -46,18 +48,23 @@ Ubar = 0. * xr_structure
 Ubar = Ubar * Tbar / T0
 
 # Calculate balanced log-surface pressure
-f = 2 * consts['Omega'] * np.sin(xr_structure.lat)
-lnpsbar = cumulative_trapezoid((f * Ubar / (- consts['Rd'] * Tbar) ).isel(sigma_half = 0),
+f = 2 * Omega * np.sin(xr_structure.lat * np.pi / 180)
+lnpsbar = cumulative_trapezoid((f * Ubar / (- Rd * Tbar) ).isel(sigma_half = 0),
                                xr_structure.lat * np.pi / 180 * 6.378e6, 
                                initial=0, 
                                axis=0,
                                ) * xr_structure.isel(sigma_half=0) 
 
-idealgill_linear.initialize_basic_state_from_sigma_data(xr.merge([Tbar.rename('T'), 
-                                                                  Ubar.rename('U'), 
-                                                                  Vbar.rename('V'),
-                                                                  Wbar.rename('W'),
-                                                                  np.exp(lnpsbar).rename('SP')]))
+
+input_data = xr.merge([Tbar.rename('T'), 
+                       Ubar.rename('U'), 
+                       Vbar.rename('V'),
+                       Wbar.rename('W'),
+                       1e5 * np.exp(lnpsbar).rename('SP')])
+if zonal_basic_state:
+    input_data = input_data.isel(lon=0)
+
+idealgill_linear.initialize_basic_state_from_sigma_data(input_data)
 
 ###################################################
 ############## INITIALIZE FORCINGS ################
@@ -65,11 +72,11 @@ idealgill_linear.initialize_basic_state_from_sigma_data(xr.merge([Tbar.rename('T
 
 # Topographic forcing
 Zsfc = 0. * xr_structure.isel(sigma_half=0) 
-# Gaussian topography
+# # Gaussian topography
 # lon0 = 0.
 # deltalon = 10.
-# H0 = 1000.  # peak height in meters
-# Phisfc['g'] = H0 * np.exp( - (xr_structure.lat-lat0)**2/(2*deltalat**2) - (xr_structure.lon-lon0)**2/(2*deltalon**2)) * xr_structure.isel(sigma_half=0)
+# H0 = 500.  # peak height in meters
+# Zsfc = H0 * np.exp( - (xr_structure.lat-lat0)**2/(2*deltalat**2) - (xr_structure.lon-lon0)**2/(2*deltalon**2)) * xr_structure.isel(sigma_half=0)
 
 # Heating forcing
 Q0 = 1. # 1 K/day heating rate
@@ -83,4 +90,4 @@ idealgill_linear.initialize_forcings_from_sigma_data(xr.merge([Qdiab.rename('QDI
 ###################################################
 ###################### RUN ########################
 ###################################################
-idealgill_linear.integrate(restart=False, use_CFL=False, timestep=400, stop_sim_time=10*86400)
+idealgill_linear.integrate(restart=False, use_CFL=False, timestep=400, stop_sim_time=5*86400)

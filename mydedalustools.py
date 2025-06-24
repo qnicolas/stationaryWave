@@ -153,7 +153,7 @@ def calc_helmholtz(u_xr):
 ################# PRESSURE VELOCITY DIAGNOSTIC #################
 ################################################################
 
-# A bug in dedalus prevents us from outputting pressure velocity at runtime.
+# A bug in dedalus prevents us from outputting pressure velocity at runtime when using axisymmetric basic states.
 # This function allows to calculate it after the fact.
 
 def calc_omega(ds):
@@ -163,27 +163,33 @@ def calc_omega(ds):
 
     Ntheta = len(ds.latitude)
     Nsigma = len(ds.sigma)
+    
     # Instantiate a stationary wave problem - takes care of instantiating coordinate system and variables,
     # and contains the function needed to calculate the pressure velocity.
-    problem_holder = StationaryWaveProblem(Ntheta, Nsigma, True, True, '','')
-        
-    
-    # placeholder for omega
-    omega = 0. * ds.sigmadot.transpose('longitude','latitude','sigma_stag').rename('omega')
+    problem_holder = StationaryWaveProblem(Ntheta, Nsigma, True, False, '','')
 
+    ds_new = ds.copy().transpose('','longitude','latitude','sigma','sigma_stag')
+    # Broadcast the background fields in longitude
+    for var in 'ubar', 'lnpsbar', 'sigmadotbar':
+        ds_new[var].data = ds_new[var].isel(longitude=0).broadcast_like(ds_new[var]).data
+        
+    # placeholder for omega
+    omega = 0. * ds.sigmadotbar.transpose('longitude','latitude','sigma_stag').rename('omega')
+
+    # Populate variables in the stationary wave problem with input data
     for i in range(1,Nsigma+1):
-        problem_holder.vars[f'u{i}'].load_from_global_grid_data(ds.u.isel(sigma=i-1).data * meter / second)
-        problem_holder.vars[f'ubar{i}'].load_from_global_grid_data(ds.ubar.isel(sigma=i-1).data * meter / second)
-        problem_holder.vars[f'lnps'].load_from_global_grid_data(ds.lnps.data)
-        problem_holder.vars[f'lnpsbar'].load_from_global_grid_data(ds.lnpsbar.data)
+        problem_holder.vars[f'u{i}'].load_from_global_grid_data(ds_new.u.isel(sigma=i-1).data * meter / second)
+        problem_holder.vars[f'ubar{i}'].load_from_global_grid_data(ds_new.ubar.isel(sigma=i-1).data * meter / second)
+        problem_holder.vars[f'lnps'].load_from_global_grid_data(ds_new.lnps.data)
+        problem_holder.vars[f'lnpsbar'].load_from_global_grid_data(ds_new.lnpsbar.data)
 
     for i in range(1,Nsigma):
-        problem_holder.vars[f'sigmadot{i}'].load_from_global_grid_data(ds.sigmadot.isel(sigma_stag=i-1).data * 1 / second)
-        problem_holder.vars[f'sigmadotbar{i}'].load_from_global_grid_data(ds.sigmadotbar.isel(sigma_stag=i-1).data * 1 / second)
+        problem_holder.vars[f'sigmadotbar{i}'].load_from_global_grid_data(ds_new.sigmadotbar.isel(sigma_stag=i-1).data * 1 / second)
 
+    # Calculate omega at each level
     for i in range(1,Nsigma):
         # output perturbation pressure velocity
-        omega_i = problem_holder._calc_omega(i) / (kilogram / meter / second**3)
+        omega_i = problem_holder._calc_omega(i).evaluate()
         omega_i.change_scales(1)
-        omega[:,:,i-1] = omega_i['g']
-    return omega
+        omega[:,:,i-1] = omega_i['g'] / (kilogram / meter / second**3)
+    return omega.transpose('latitude','longitude','sigma_stag')

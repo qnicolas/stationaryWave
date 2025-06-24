@@ -96,6 +96,9 @@ class StationaryWaveProblem:
         # Setup the horizontal grid and vertical grid
         self._setup_horizontal_grid()
         self._setup_vertical_grid()
+
+        # Setup problem variables and equations
+        self._setup_problem()
         
         # For debugging purposes, this is how to access the rank and size of the MPI communicator
         # world_rank = MPI.COMM_WORLD.Get_rank()
@@ -173,7 +176,7 @@ class StationaryWaveProblem:
             partialsum = "+".join([f"T{j}/({j}-0.5)" for j in range(i+1,self.Nsigma+1)])
             return f"(Rd * ({partialsum}))"
 
-    def setup_problem(self):
+    def _setup_problem(self):
         """
         Setup the vertical grid, instantiate all fields, and lay out the problem equations.
         """
@@ -443,6 +446,35 @@ class StationaryWaveProblem:
 
         self.initialize_basic_state_from_sigma_data(input_data_vitp)
 
+    def _calc_omega(self,i):
+        """
+        Diagnose pressure velocity.
+        
+        Parameters:
+        -----------
+        i : int
+            The index of the full sigma level (1 to Nsigma-1).
+        """
+        p0 = 1e5 * kilogram / meter / second ** 2  # Reference surface pressure in Pa
+
+        # basic-state pressure velocity
+        sigma_full_i = i*self.deltasigma
+        sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
+        sigmadotbar_i = self.vars[f"sigmadotbar{i}"]
+        Dlnpsbar_Dt = eval(f"(ubar{i}+ubar{i+1})@d3.grad(lnpsbar)/2",self.namespace)
+        omegabar_i = p0 * np.exp(self.vars["lnpsbar"]) * ( sigma_full_i * Dlnpsbar_Dt + sigmadotbar_i)
+        
+        # total pressure velocity
+        Dlnpstot_Dt = eval(f"{self._dlnps_dt()}\
+                            + (ubar{i}+ubar{i+1})@grad(lnpsbar)/2\
+                            + (u{i}+u{i+1})@grad(lnpsbar)/2\
+                            + (ubar{i}+ubar{i+1})@grad(lnps)/2".replace('div','d3.div').replace('grad','d3.grad')
+                          ,self.namespace)
+        
+        omegatot_i = p0 * np.exp(self.vars["lnpsbar"]+self.vars["lnps"]) * ( sigma_full_i * Dlnpstot_Dt + sigmadotbar_i + sigmadot_i)
+        
+        return omegatot_i-omegabar_i
+
     def _configure_snapshots(self):
         """ 
         Define output variables. This version outputs all state variables, forcings, and background state,
@@ -462,8 +494,7 @@ class StationaryWaveProblem:
             self.snapshots.add_task(-d3.div(d3.skew(self.vars[f'u{i}'])) / (1/second), name=f'zeta{i}') 
 
             # Diabatic heating
-            if not self.zonal_basic_state:  # otherwise a bug in Dedalus prevents us from outputting Qdiab for now
-                self.snapshots.add_task(self.vars[f'Qdiab{i}'] / Kelvin * day, name=f'Qdiab{i}')
+            self.snapshots.add_task(self.vars[f'Qdiab{i}'] / Kelvin * day, name=f'Qdiab{i}')
 
             # Basic-state variables
             self.snapshots.add_task(self.vars[f'ubar{i}'] / (meter / second), name=f'ubar{i}')
@@ -472,7 +503,6 @@ class StationaryWaveProblem:
                 self.snapshots.add_task(self.vars[f'sigmadotbar{i}'] / (1/second), name=f'sigmadotbar{i}')
             
         # Add sigma and pressure velocity to snapshots  
-        p0 = 1e5 * kilogram / meter / second ** 2  # Reference surface pressure in Pa
         for i in range(1,self.Nsigma):
             # What I'm doing here is to calculate sigmadot at level i. 
             # The sigmadot function does exactly that, but outputs a string that goes in the equation formulation
@@ -484,23 +514,7 @@ class StationaryWaveProblem:
             self.snapshots.add_task(sigmadot_i / (1/second), name=f'sigmadot{i}') 
             
             if not self.zonal_basic_state: #otherwise a bug in Dedalus prevents us from outputting omega for now
-                # basic-state pressure velocity
-                sigma_i = (i-0.5)*self.deltasigma
-                sigmadotbar_i = self.vars[f"sigmadotbar{i}"]
-                Dlnpsbar_Dt = eval(f"(ubar{i}+ubar{i+1})@d3.grad(lnpsbar)/2",self.namespace)
-                omegabar_i = p0 * np.exp(self.vars["lnpsbar"]) * ( sigma_i * Dlnpsbar_Dt + sigmadotbar_i)
-                
-                # total pressure velocity
-                Dlnpstot_Dt = eval(f"{self._dlnps_dt()}\
-                                    + (ubar{i}+ubar{i+1})@grad(lnpsbar)/2\
-                                    + (u{i}+u{i+1})@grad(lnpsbar)/2\
-                                    + (ubar{i}+ubar{i+1})@grad(lnps)/2".replace('div','d3.div').replace('grad','d3.grad')
-                                  ,self.namespace)
-                
-                omegatot_i = p0 * np.exp(self.vars["lnpsbar"]+self.vars["lnps"]) * ( sigma_i * Dlnpstot_Dt + sigmadotbar_i + sigmadot_i)
-                
-                # output perturbation pressure velocity
-                self.snapshots.add_task((omegatot_i-omegabar_i) / (kilogram / meter / second**3), name=f'omega{i}')
+                self.snapshots.add_task(self._calc_omega(i) / (kilogram / meter / second**3), name=f'omega{i}')
             
     def integrate(self, restart=False, restart_id='s1', use_CFL=False, safety_CFL=0.7, timestep=400, stop_sim_time=5*86400):
         """Integrate the problem. 
@@ -535,11 +549,13 @@ class StationaryWaveProblem:
         # Need to add all velocities and sigmadots - not sure if worth it
         for i in range(1,self.Nsigma+1):
             CFL.add_velocity(self.vars[f'u{i}'])
-            CFL.add_velocity(self.vars[f'ubar{i}'])
+            if not self.zonal_basic_state:
+                CFL.add_velocity(self.vars[f'ubar{i}'])
         for i in range(1,self.Nsigma):
             # sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
             # CFL.add_frequency(sigmadot_i/self.deltasigma/2)
-            CFL.add_frequency(self.vars[f'sigmadotbar{i}']/self.deltasigma/2)
+            if not self.zonal_basic_state:
+                CFL.add_frequency(self.vars[f'sigmadotbar{i}']/self.deltasigma/2)
 
         # Main loop
         with warnings.catch_warnings():

@@ -3,13 +3,12 @@ import xarray as xr
 from stationarywave import StationaryWaveProblem
 
 sph_resolution = 32; Nsigma = 12; linear = True; zonal_basic_state = True
-output_dir = "data/"; case_name = "realgill"
+output_dir = "/net/helium/atmosdyn/qnicolas/stationarywave_snapshots/"; case_name = "realgill"
 
-idealgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name)
-idealgill_linear.setup_problem()
+realgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name)
 
 basicstate = xr.open_dataset("era5_basicstate.nc").rename(latitude='lat',level='pressure').transpose('pressure','lat')
-idealgill_linear.initialize_basic_state_from_pressure_data(basicstate)
+realgill_linear.initialize_basic_state_from_pressure_data(basicstate)
 
 # Define forcing
 Q0 = 2.  # 2 K/day heating rate
@@ -27,5 +26,5 @@ Qdiab = Q0 * np.sin(np.pi * xr_structure.sigma_half) * np.pi/2 \
 Zsfc = 0 * xr_structure.isel(sigma_half=0)
 input_forcings = xr.merge([Qdiab.rename('QDIAB'), Zsfc.rename('ZSFC')])
 
-idealgill_linear.initialize_forcings_from_sigma_data(input_forcings)
-idealgill_linear.integrate(restart=False, use_CFL=False, timestep=400, stop_sim_time=20*86400)
+realgill_linear.initialize_forcings_from_sigma_data(input_forcings)
+realgill_linear.integrate(restart=False, use_CFL=False, timestep=400, stop_sim_time=20*86400)

@@ -1,21 +1,23 @@
-###########################################################################################
-######### Sigma-level stationary wave model on the sphere                         #########
-######### Inspired from Ting & Yu (1998, JAS).                                    #########
-######### Model has a variable number of sigma levels (N)                         #########
-######### and uses spherical harmonics in the horizontal.                         #########
-######### Prognostic variables are horizontal velocity at each level (u,v)_i,     #########
-######### temperature T_i, and perturbation-log-surface-pressure lnps.            #########
-#########                                                                         #########
-######### For now, the model is linear (nonlinear extension would be quite        #########
-######### straightforward, contact qnicolas@berkeley.edu)                         #########
-#########                                                                         #########
-######### A steady-state should be reached after a few days of integration.       #########
-#########                                                                         #########
-######### To run: change SNAPSHOTS_DIR, then                                      #########
-######### mpiexec -n {number of cores} python stationarywave_realgill.py {0 or 1} #########
-######### the last argument stands for restart (0 for initial run, 1 for          #########
-######### restart run)                                                            #########
-###########################################################################################
+###########################################################################
+# Sigma-level stationary wave model on the sphere                         #
+# Inspired from Ting & Yu (1998, JAS).                                    #
+# Model has a variable number of sigma levels (N)                         #
+# and uses spherical harmonics in the horizontal.                         #
+# Prognostic variables are horizontal velocity at each level (u,v)_i,     #
+# temperature T_i, and perturbation-log-surface-pressure lnps.            #
+#                                                                         #
+# TODO: Nonlinear extension, test initialize_forcings_from_pressure_data, add some attributes to the output,
+#                                                                         #
+# A steady-state should be reached after a few days of integration, typically 20-50?       #
+#                                                                         #
+# Example run script:      
+# 
+# TO BE WRITTEN
+# 
+# mpiexec -n {number of cores} python example_script.py {0 or 1} #
+# the last argument stands for restart (0 for initial run, 1 for          #
+# restart run)                                                            #
+###########################################################################
 
 
 import numpy as np
@@ -26,8 +28,6 @@ import warnings
 from mpi4py import MPI
 
 import xarray as xr
-
-SNAPSHOTS_DIR = "/Users/qnicolas/stationaryWave/data/" # Change this to your desired output directory
 
 # Simulation units 
 # The main point is to do the calculations on a sphere of unit radius, 
@@ -48,19 +48,64 @@ consts = {'R0': 6.37122e6 * meter,  # Earth radius in meters
           }
 
 class StationaryWaveProblem:
-    def __init__(self, resolution=32, Nsigma=12, linear=True, zonal_basic_state=True):
+    """
+    Class to setup and run a stationary wave problem on the sphere.
+    
+    Handles the setup of spherical coordinates and bases, defines the problem equations,
+    initializes the basic state and forcing fields, and integrates the problem.
+    """
+    def __init__(self, resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, hyperdiffusion_coefficient=1e17, damping_timescales=[15, 1.0, 0.2]):
+        """
+        Initialize the stationary wave problem with given parameters.
+
+        Parameters:
+        ------------
+        resolution : int
+            Maximum degree & order in the spherical harmonic expansion. Akin to the order of a triangular truncation.
+        Nsigma : int
+            Number of half sigma levels in the vertical grid.
+        linear : bool 
+            Whether to include nonlinear terms in the equations.
+        zonal_basic_state : bool
+            Whether the basic state is zonally-invariant (i.e., only depends on latitude).
+        output_dir : str
+            Directory where output files will be saved.
+        case_name : str
+            Name of the run, used to name output files.
+        hyperdiffusion_coefficient : float
+            Hyperdiffusion coefficient in m^4/s (default: 1e17).
+        damping_timescales : list
+            List of three damping timescales in days for the Rayleigh damping: for the Nsigma-2 topmost levels, 
+            the second bottom-most level, and the bottom-most level, respectively.
+        """
         self.resolution = resolution
         self.Nsigma = Nsigma
+        self.deltasigma = 1/self.Nsigma
+        
         self.zonal_basic_state = zonal_basic_state
         self.linear = linear
+        self.hyperdiffusion_coefficient = hyperdiffusion_coefficient  # Hyperdiffusion coefficient in m^4/s
+        self.output_dir = output_dir
+        self.case_name = case_name
 
+        # Rayleigh_damping_coefficients as in equation 1 of Ting&Yu 1998
+        self.rayleigh_damping_coefficients = np.ones(self.Nsigma)/(damping_timescales[0]*day)
+        self.rayleigh_damping_coefficients[self.Nsigma-2] = 1/(damping_timescales[1]*day)
+        self.rayleigh_damping_coefficients[self.Nsigma-1] = 1/(damping_timescales[2]*day)      
+
+        # Setup the horizontal grid and vertical grid
+        self._setup_horizontal_grid()
+        self._setup_vertical_grid()
+        
         # For debugging purposes, this is how to access the rank and size of the MPI communicator
         # world_rank = MPI.COMM_WORLD.Get_rank()
         # world_size = MPI.COMM_WORLD.Get_size()
         # print(f"Running on rank {world_rank} of {world_size}"
     
-    def setup_bases(self):
-        """Setup the spherical coordinates and bases for the simulation"""
+    def _setup_horizontal_grid(self):
+        """
+        Setup the spherical coordinates and bases for the simulation, as well as the vertical grid.
+        """
         dtype = np.float64
         Nphi = self.resolution * 2  
         Ntheta = self.resolution 
@@ -71,27 +116,57 @@ class StationaryWaveProblem:
         else:
             dealias = (3/2, 3/2) # Delaiasing factor appropriate for order 2 nonlinearlities 
 
-        # Bases
+        # Spherical coordinates / bases
         self.coords = d3.S2Coordinates('phi', 'theta')
         self.dist = d3.Distributor(self.coords, dtype=dtype)#
         self.full_basis = d3.SphereBasis(self.coords, (Nphi, Ntheta), radius=consts['R0'], dealias=dealias, dtype=dtype)
         self.zonal_basis = d3.SphereBasis(self.coords, (1, Ntheta), radius=consts['R0'], dealias=dealias, dtype=dtype)
 
+    def _setup_vertical_grid(self):
+        """
+        Setup the vertical grid for the simulation. We use uniformly spaced sigma levels.
+        """
+        self.sigma = (np.arange(self.Nsigma) + 0.5) * self.deltasigma # Half levels
+        self.sigma_full = np.arange(1,self.Nsigma) * self.deltasigma # Full levels, excluding surface and model top
+
     # The following three functions are used in the formulation of the problem equations
     def _dlnps_dt(self):
-        """Function to compute the log surface pressure tendency"""
+        """
+        Outputs a str that expresses the log surface pressure tendency as a function of problem variables
+        (perturbation log surface pressure lnps, basic-state log surface pressure lnpsbar,
+        perturbation velocities u, basic-state velocities ubar).
+        """
         sum_us    = "+".join([f"u{j}"  for j in range(1,self.Nsigma+1)])
         sum_ubars = "+".join([f"ubar{j}" for j in range(1,self.Nsigma+1)])
         return f"(- deltasigma * (div({sum_us}) + ({sum_us})@grad(lnpsbar) + ({sum_ubars})@grad(lnps)))"
 
     def _sigmadot(self,i):
-        """Function to compute the sigma-vertical-velocity at level i"""
+        """
+        Outputs a str that expresses the sigma-vertical-velocity at level i as a function of problem variables
+        (perturbation log surface pressure lnps, basic-state log surface pressure lnpsbar,
+        perturbation velocities u, basic-state velocities ubar).
+
+        Parameters:
+        -----------
+        i : int
+            The index of the half sigma level (1 to Nsigma).
+        """
+        #"""Function to compute the sigma-vertical-velocity at level i"""
         partialsum_us = "+".join([f"u{j}"  for j in range(1,i+1)])
         partialsum_ubars = "+".join([f"ubar{j}" for j in range(1,i+1)])
         return f"(-{i}*deltasigma*{self._dlnps_dt()} - deltasigma * (div({partialsum_us}) + ({partialsum_us})@grad(lnpsbar) + ({partialsum_ubars})@grad(lnps)))"
 
     def _Phiprime(self,i):
-        """Function to compute the geopotential height (perturbation relative to surface geopotential height) at full level i (0 is model top, N is surface)"""
+        """
+        Outputs a str that expresses the perturbation geopotential height at full level i as a function of 
+        perturbartion temperarture T.
+    
+        Parameters:
+        -----------
+        i : int
+            The index of the half sigma level (1 to Nsigma).
+        """
+        #"""Function to compute the geopotential height (perturbation relative to surface geopotential height) at full level i (0 is model top, N is surface)"""
         if i==self.Nsigma:
             return 0.
         else:
@@ -99,23 +174,19 @@ class StationaryWaveProblem:
             return f"(Rd * ({partialsum}))"
 
     def setup_problem(self):
-        """Setup the vertical grid, all fields and problem equations"""
-        # Vertical grid
-        deltasigma = 1/self.Nsigma
-        sigma = (np.arange(self.Nsigma) + 0.5)*deltasigma # Half levels
-        self.deltasigma = deltasigma 
-        self.sigma = sigma
-
+        """
+        Setup the vertical grid, instantiate all fields, and lay out the problem equations.
+        """
         # hyperdiffusion & Rayleigh damping 
-        nu = 40e15 * meter**4 / second       # Ting&Yu 1998 use 10^17
-        epsilon = np.ones(self.Nsigma)/(15.*day)   #See equation 1 of Ting&Yu 1998
-        epsilon[self.Nsigma-1] = 1/(0.2*day)       #See equation 1 of Ting&Yu 1998
-        epsilon[self.Nsigma-2] = 1/(1.0*day)       #See equation 1 of Ting&Yu 1998
+        nu = self.hyperdiffusion_coefficient * meter**4 / second 
+        epsilon = self.rayleigh_damping_coefficients 
 
         # cross product by zhat times sin(latitude) for Coriolis force
         zcross = lambda A: d3.MulCosine(d3.skew(A))
 
-        # Useful constants
+        # Constants that appear in the problem equations
+        sigma = self.sigma
+        deltasigma = self.deltasigma
         kappa = consts['Rd'] / consts['cp']  
         Rd = consts['Rd'] 
         Omega = consts['Omega'] 
@@ -226,81 +297,158 @@ class StationaryWaveProblem:
                 # Thermodynamic equation
                 self.problem.add_equation(LHS_T + " = " + forcing_T + " - " + minus_RHS_T)
 
-    def initialize_basic_state_with_zeros(self):
-        for i in range(1,self.Nsigma+1):
-            self.vars[f'ubar{i}']['g'] = 0.
-            self.vars[f'Tbar{i}']['g'] = (200. + self.sigma[i-1] * 100.) * Kelvin  # Example: linear decrease from 300K at surface to 200K at top
-
-        # Basic-state log-surface pressure
-        self.vars['lnpsbar']['g'] = 0.
-
-        # Basic-state sigmadot (omega/ps - sigma * u.grad(lnps))
-        for i in range(1,self.Nsigma):
-            self.vars[f'sigmadotbar{i}']['g'] = 0.
-
     def initialize_basic_state_from_sigma_data(self,input_data):
-        """Initialize the basic state fields.
-        This function is used to initialize the basic state fields from a given 
-        input data (given as xarray.Dataset) that has (sigma,lat,lon) coordinates.
+        """
+        Initialize the basic state fields from input data that are defined on the same sigma levels as the model.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+
+        Parameters:
+        -----------
+        input_data : xarray.Dataset
+            Dataset containing the basic state variables (U, V, W, T, SP) on sigma levels.
+            U is zonal velocity in m/s, V is meridional velocity in m/s, W is the pressure velocity in Pa/s,
+            T is temperature in K, SP is surface pressure in Pa.
+            SP must have dimensions (lat, lon) or (lat,) for a zonal basic state.
+            U,V,T must have dimensions (sigma_half, lat, lon) or (sigma_half, lat) for a zonal basic state.
+            W must have dimensions (sigma_full, lat, lon) or (sigma_full, lat) for a zonal basic state.
         """
         # Get coordinate values
         phi, theta = self.dist.local_grids(self.full_basis)
         lat_deg = (np.pi / 2 - theta + 0*phi) * 180 / np.pi 
         lon_deg = (phi-np.pi) * 180 / np.pi
 
+        assert np.allclose(input_data.sigma_half.data, self.sigma     ), "Input data sigma levels must match model sigma levels."
+        assert np.allclose(input_data.sigma_full.data, self.sigma_full), "Input data sigma levels must match model sigma levels."
+        
         if self.zonal_basic_state:
-            assert input_data.U.dims == ('sigma', 'lat'), "Input data must have dimensions (sigma, lat) for zonal basic state."
+            assert set(input_data.dims) == {'sigma_half', 'sigma_full', 'lat'}, "Input data must have dimensions {sigma_half, sigma_full, lat} for zonal basic state."
             local_grid_xr = xr.DataArray(np.zeros(len(lat_deg[0])),coords={'lat':lat_deg[0]},dims=['lat'])
             target_shape = (1, len(lat_deg[0]))
         else:
-            assert input_data.U.dims == ('sigma', 'lat', 'lon'), "Input data must have dimensions (sigma, lat, lon) for non-zonal basic state."
-            local_grid_xr = xr.DataArray(np.zeros(lat_deg.shape),coords={'lat':lat_deg,'lon':lon_deg},dims=['lat','lon'])
+            assert set(input_data.dims) == {'sigma_half', 'sigma_full', 'lat', 'lon'}, "Input data must have dimensions {sigma_half, sigma_full, lat, lon} for non-zonal basic state."
+            local_grid_xr = xr.DataArray(np.zeros(lat_deg.shape),coords={'lon':lon_deg[:,0],'lat':lat_deg[0]},dims=['lon','lat'])
             target_shape = lat_deg.shape
 
-        sigma_full = np.arange(1,self.Nsigma) * self.deltasigma
-        sigma_full_xr = xr.DataArray(sigma_full,coords={'sigma':sigma_full},dims=['sigma'])
-        sigma_half_xr = xr.DataArray(self.sigma,coords={'sigma':self.sigma},dims=['sigma'])
-
-        basicstate_halflevs = input_data.interp_like(sigma_half_xr * local_grid_xr, method='linear')
-        basicstate_fulllevs = input_data.interp_like(sigma_full_xr * local_grid_xr, method='linear')
+        input_data_itp = input_data.interp_like(local_grid_xr, method='linear').transpose('sigma_half','sigma_full',*local_grid_xr.dims)
 
         # Basic-state temperature, wind
         for i in range(1,self.Nsigma+1):
-            self.vars[f'ubar{i}']['g'] = np.stack([ basicstate_halflevs.U.isel(sigma=i-1).data,
-                                                   -basicstate_halflevs.V.isel(sigma=i-1).data ], axis=0).reshape((2,*target_shape)) * meter / second
-            self.vars[f'Tbar{i}']['g'] = basicstate_halflevs.T.isel(sigma=i-1).data.reshape(target_shape) * Kelvin
+            self.vars[f'ubar{i}']['g'] = np.stack([ input_data_itp.U.isel(sigma_half=i-1).data,
+                                                   -input_data_itp.V.isel(sigma_half=i-1).data ], axis=0).reshape((2,*target_shape)) * meter / second
+            self.vars[f'Tbar{i}']['g'] = input_data_itp.T.isel(sigma_half=i-1).data.reshape(target_shape) * Kelvin
 
         # Basic-state log-surface pressure
-        self.vars['lnpsbar']['g'] = np.log(basicstate_halflevs.SP.data/1e5).reshape(target_shape)
+        self.vars['lnpsbar']['g'] = np.log(input_data_itp.SP.data/1e5).reshape(target_shape)
 
         # Basic-state sigmadot (omega/ps - sigma * u.grad(lnps))
-        omega_ov_ps = basicstate_fulllevs.W/basicstate_fulllevs.SP * 1/second
+        omega_ov_ps = input_data_itp.W/input_data_itp.SP * 1/second
         for i in range(1,self.Nsigma):
-            self.vars[f'sigmadotbar{i}']['g'] = omega_ov_ps.isel(sigma=i-1).data.reshape(target_shape)
+            self.vars[f'sigmadotbar{i}']['g'] = omega_ov_ps.isel(sigma_full=i-1).data.reshape(target_shape)
             self.vars[f'sigmadotbar{i}'] = self.vars[f'sigmadotbar{i}']\
-                - sigma_full[i-1] * (self.vars[f'ubar{i}']+self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar']) / 2
+                - self.sigma_full[i-1] * (self.vars[f'ubar{i}']+self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar']) / 2
+            
+    def initialize_basic_state_from_pressure_data(self,input_data):
+        """
+        Initialize the basic state fields from input data that are defined on arbitrary pressure levels.
+        Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
+        before calling initialize_basic_state_from_sigma_data.
 
-    def initialize_forcings(self):
-        """Initialize the forcing fields"""
+        Parameters:
+        -----------
+        input_data : xarray.Dataset
+            Dataset containing the basic state variables (U, V, W, T, SP) on pressure levels. 
+            U is zonal velocity in m/s, V is meridional velocity in m/s, W is the pressure velocity in Pa/s,
+            T is temperature in K, SP is surface pressure in Pa.
+            SP must have dimensions (lat, lon) or (lat,) for a zonal basic state.
+            U,V,W,T must have dimensions (pressure, lat, lon) or (pressure, lat) for a zonal basic state.
+            pressure is supposed to be in hPa to match most reanalysis datasets.
+        """
+
+        input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
+        input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma,sig,y),
+                                             input_data.sigma,
+                                             input_data[['U','V','T']],
+                                             input_core_dims=(('pressure',),('pressure',)),
+                                             output_core_dims=(('sigma_half',),),
+                                             vectorize=True)
+        input_data_fulllevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_full,sig,y),
+                                             input_data.sigma,
+                                             input_data[['W',]],
+                                             input_core_dims=(('pressure',),('pressure',)),
+                                             output_core_dims=(('sigma_full',),),
+                                             vectorize=True)
+
+        input_data_vitp = xr.merge((input_data_halflevs.assign_coords(sigma_half=self.sigma),
+                                    input_data_fulllevs.assign_coords(sigma_full=self.sigma_full),
+                                    input_data.SP)
+                                    )
+
+        self.initialize_basic_state_from_sigma_data(input_data_vitp)
+
+    def initialize_forcings_from_sigma_data(self,input_data):
+        """
+        Initialize the forcing fields from input data that are defined on the same sigma levels as the model.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+
+        Parameters:
+        -----------
+        input_data : xarray.Dataset
+            Dataset containing the forcing fields (ZSFC, QDIAB).
+            ZSFC is the surface height in m and must have dimensions (lat, lon)
+            QDIAB is the diabatic heating rate in K/day and must have dimensions (sigma_half, lat, lon).
+        """
         # Get coordinate values
         phi, theta = self.dist.local_grids(self.full_basis)
-        lat = np.pi / 2 - theta + 0*phi
-        lon = phi-np.pi
+        lat_deg = (np.pi / 2 - theta + 0*phi) * 180 / np.pi 
+        lon_deg = (phi-np.pi) * 180 / np.pi
+
+        assert set(input_data.dims) == {'sigma_half', 'lat', 'lon'}, "Input forcings must have dimensions {sigma_half, lat, lon}."
+        assert np.allclose(input_data.sigma_half.data, self.sigma), "Input forcings sigma levels must match model sigma levels."
+
+        local_grid_xr = xr.DataArray(np.zeros(lat_deg.shape),coords={'lon':lon_deg[:,0],'lat':lat_deg[0]},dims=['lon','lat'])
+
+        input_data_itp = input_data.interp_like(local_grid_xr, method='linear').transpose('sigma_half','lon','lat')
 
         # Topographic forcing
-        self.vars['Phisfc']['g'] = 0. * meter * consts['g'] 
-        
-        # Heating forcing
-        Q0 = 2. * Kelvin / day # 2 K/day heating rate
+        self.vars['Phisfc']['g'] = input_data_itp.ZSFC.data * meter * consts['g'] 
+        # Diabatic heating forcing
         for i in range(1,self.Nsigma+1):
-            deltalat = 10 * np.pi/180
-            deltalon = 35 * np.pi/180
-            self.vars[f'Qdiab{i}']['g'] = Q0 * np.sin(np.pi * self.sigma[i-1]) * np.pi/2 * np.cos(np.pi * lat / (2 * deltalat))**2 * np.cos(np.pi * lon / (2 * deltalon))**2 * (np.abs(lat)<deltalat) * (np.abs(lon)<deltalon)
+            self.vars[f'Qdiab{i}']['g'] = input_data_itp.QDIAB.isel(sigma_half=i-1).data * Kelvin / day
+
+    def initialize_forcings_from_pressure_data(self,input_data):
+        """
+        Initialize the forcing fields from input data that are defined on arbitrary pressure levels.
+        Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
+        before calling initialize_forcings_from_sigma_data.
+
+        Parameters:
+        -----------
+        input_data : xarray.Dataset
+            Dataset containing the forcing fields (ZSFC, QDIAB) on pressure levels. 
+            ZSFC is the surface height in m and must have dimensions (lat, lon)
+            QDIAB is the diabatic heating rate in K/day and must have dimensions (pressure, lat, lon).
+        """
+
+        input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
+        input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma,sig,y),
+                                             input_data.sigma,
+                                             input_data[['QDIAB',]],
+                                             input_core_dims=(('pressure',),('pressure',)),
+                                             output_core_dims=(('sigma_half',),),
+                                             vectorize=True)
+
+        input_data_vitp = xr.merge((input_data_halflevs.assign_coords(sigma_half=self.sigma),
+                                    input_data.ZSFC)
+                                    )
+
+        self.initialize_basic_state_from_sigma_data(input_data_vitp)
 
     def _configure_snapshots(self):
-
-        # Add all state variables, vorticity, forcings, and background state to snapshots
-        # You may want to omit some of these to reduce output size
+        """ 
+        Define output variables. This version outputs all state variables, forcings, and background state,
+        plus vorticity and pressure velocity at each half level.
+        You may want to omit some of these to reduce output size.
+        """
         self.snapshots.add_task(self.vars['lnps'])
         self.snapshots.add_task(self.vars['lnpsbar'])
         self.snapshots.add_task(self.vars['Phisfc'] / (meter**2 / second**2), name = 'Phisfc') 
@@ -325,7 +473,7 @@ class StationaryWaveProblem:
             
         # Add sigma and pressure velocity to snapshots  
         p0 = 1e5 * kilogram / meter / second ** 2  # Reference surface pressure in Pa
-        for i in range(1,self.Nsigma+1):
+        for i in range(1,self.Nsigma):
             # What I'm doing here is to calculate sigmadot at level i. 
             # The sigmadot function does exactly that, but outputs a string that goes in the equation formulation
             # What we simply need to do is to transform this string into an actual expression that acts on the fields
@@ -354,7 +502,7 @@ class StationaryWaveProblem:
                 # output perturbation pressure velocity
                 self.snapshots.add_task((omegatot_i-omegabar_i) / (kilogram / meter / second**3), name=f'omega{i}')
             
-    def integrate(self, restart=False, restart_id='s1', use_CFL=False, safety_CFL=0.8, timestep=400, stop_sim_time=5*86400):
+    def integrate(self, restart=False, restart_id='s1', use_CFL=False, safety_CFL=0.7, timestep=400, stop_sim_time=5*86400):
         """Integrate the problem. 
         args:
             - restart: bool, whether this is a restart run
@@ -372,21 +520,26 @@ class StationaryWaveProblem:
         if not restart:
             file_handler_mode = 'overwrite'
         else:
-            write, initial_timestep = self.solver.load_state(SNAPSHOTS_DIR+'%s/%s_%s.h5'%(snapshot_id,snapshot_id,restart_id))
+            write, initial_timestep = self.solver.load_state(self.output_dir+'%s/%s_%s.h5'%(snapshot_id,snapshot_id,restart_id))
             timestep = min(timestep, initial_timestep)
             file_handler_mode = 'append'
 
-        snapshot_id = f'stationarywave_{self.Nsigma}level_T{self.resolution}_realgill'
-
+        snapshot_id = f'stationarywave_{self.Nsigma}level_T{self.resolution}_{self.case_name}'
 
         # Save snapshots every 6h of model time
-        self.snapshots = self.solver.evaluator.add_file_handler(SNAPSHOTS_DIR+snapshot_id, sim_dt=3600 * second, mode=file_handler_mode)
+        self.snapshots = self.solver.evaluator.add_file_handler(self.output_dir+snapshot_id, sim_dt=3600 * second, mode=file_handler_mode)
         self._configure_snapshots()
 
         # CFL
-        CFL = d3.CFL(self.solver, initial_dt=timestep, cadence=100, safety=safety_CFL, threshold=0.1, max_dt = 0.2)
+        CFL = d3.CFL(self.solver, initial_dt=timestep, cadence=20, safety=safety_CFL, min_dt = timestep, max_change = 1.5)
         # Need to add all velocities and sigmadots - not sure if worth it
-        # CFL.add_velocity(us[0])
+        for i in range(1,self.Nsigma+1):
+            CFL.add_velocity(self.vars[f'u{i}'])
+            CFL.add_velocity(self.vars[f'ubar{i}'])
+        for i in range(1,self.Nsigma):
+            # sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
+            # CFL.add_frequency(sigmadot_i/self.deltasigma/2)
+            CFL.add_frequency(self.vars[f'sigmadotbar{i}']/self.deltasigma/2)
 
         # Main loop
         with warnings.catch_warnings():
@@ -405,21 +558,3 @@ class StationaryWaveProblem:
                 raise
             finally:
                 self.solver.log_stats()
-
-# ####################################################
-# ###### SAVE THIS .py FILE TO OUTPUT DIRECTORY ######
-# ####################################################
-# import os;import shutil;
-# from pathlib import Path
-# if self.dist.comm.rank == 0:
-#     Path(SNAPSHOTS_DIR+snapshot_id).mkdir(parents=True, exist_ok=True)
-#     shutil.copyfile(os.path.abspath(__file__), SNAPSHOTS_DIR+snapshot_id+'/'+os.path.basename(__file__))
-
-# if __name__ == "__main__":
-#     idealgill_linear = StationaryWaveProblem(resolution=8, Nsigma=4, linear=True, zonal_basic_state=True)
-#     idealgill_linear.setup_bases()
-#     idealgill_linear.setup_problem()
-#     idealgill_linear.initialize_basic_state_with_zeros()
-#     idealgill_linear.initialize_forcings()
-#     idealgill_linear.integrate(restart=False, use_CFL=False, timestep=400, stop_sim_time=20*86400)
-

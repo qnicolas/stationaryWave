@@ -4,6 +4,7 @@ import dedalus.public as d3
 import time
 import h5py
 import matplotlib.pyplot as plt
+from stationarywave import StationaryWaveProblem
 
 
 def thetaphi_to_latlon(ds):
@@ -84,7 +85,7 @@ def concat_levels(ds,N):
 
 
 ################################################################
-########################  HELMHOLTZ DECOMPOSITION  ############################
+##################  HELMHOLTZ DECOMPOSITION  ###################
 ################################################################
 
 def calc_helmholtz(u_xr):
@@ -99,7 +100,7 @@ def calc_helmholtz(u_xr):
         u_div (divergent part of u), div (divergence of u), and psi (streamfunction)
     """
     meter = 1 / 6.37122e6 # To perform the numerical calculation, we rescale all lengths by Earth's radius 
-    second = 1.
+    second = 1./3600
 
     dealias = (3/2,3/2)
     dtype = np.float64
@@ -148,4 +149,41 @@ def calc_helmholtz(u_xr):
                      psi_xr / (meter**2 / second),
                      divu_xr / (1/second))).transpose('','latitude','longitude','sigma')
         
+################################################################
+################# PRESSURE VELOCITY DIAGNOSTIC #################
+################################################################
+
+# A bug in dedalus prevents us from outputting pressure velocity at runtime.
+# This function allows to calculate it after the fact.
+
+def calc_omega(ds):
+    kilogram = 1.
+    meter = 1 / 6.37122e6 # To perform the numerical calculation, we rescale all lengths by Earth's radius 
+    second = 1./3600
+
+    Ntheta = len(ds.latitude)
+    Nsigma = len(ds.sigma)
+    # Instantiate a stationary wave problem - takes care of instantiating coordinate system and variables,
+    # and contains the function needed to calculate the pressure velocity.
+    problem_holder = StationaryWaveProblem(Ntheta, Nsigma, True, True, '','')
+        
     
+    # placeholder for omega
+    omega = 0. * ds.sigmadot.transpose('longitude','latitude','sigma_stag').rename('omega')
+
+    for i in range(1,Nsigma+1):
+        problem_holder.vars[f'u{i}'].load_from_global_grid_data(ds.u.isel(sigma=i-1).data * meter / second)
+        problem_holder.vars[f'ubar{i}'].load_from_global_grid_data(ds.ubar.isel(sigma=i-1).data * meter / second)
+        problem_holder.vars[f'lnps'].load_from_global_grid_data(ds.lnps.data)
+        problem_holder.vars[f'lnpsbar'].load_from_global_grid_data(ds.lnpsbar.data)
+
+    for i in range(1,Nsigma):
+        problem_holder.vars[f'sigmadot{i}'].load_from_global_grid_data(ds.sigmadot.isel(sigma_stag=i-1).data * 1 / second)
+        problem_holder.vars[f'sigmadotbar{i}'].load_from_global_grid_data(ds.sigmadotbar.isel(sigma_stag=i-1).data * 1 / second)
+
+    for i in range(1,Nsigma):
+        # output perturbation pressure velocity
+        omega_i = problem_holder._calc_omega(i) / (kilogram / meter / second**3)
+        omega_i.change_scales(1)
+        omega[:,:,i-1] = omega_i['g']
+    return omega

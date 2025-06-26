@@ -6,7 +6,16 @@ from stationarywave import StationaryWaveProblem
 sph_resolution = 32; Nsigma = 12; linear = True; zonal_basic_state = True
 output_dir = "/net/helium/atmosdyn/qnicolas/stationarywave_snapshots/"; case_name = "idealgill"
 
-idealgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, hyperdiffusion_coefficient=40e15)
+# damping as in Ting&Yu 1998
+damping_timescale = np.ones(Nsigma) * 15
+damping_timescale[-1] = 0.2
+damping_timescale[-2] = 1.
+
+idealgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, 
+                                         hyperdiffusion_coefficient=40e15,
+                                         rayleigh_damping_timescale=damping_timescale,
+                                         newtonian_cooling_timescale=damping_timescale
+                                        )
 
 ###################################################
 ############ INITIALIZE BASIC STATE ###############
@@ -79,7 +88,7 @@ Zsfc = 0. * xr_structure.isel(sigma_half=0)
 # Zsfc = H0 * np.exp( - (xr_structure.lat-lat0)**2/(2*deltalat**2) - (xr_structure.lon-lon0)**2/(2*deltalon**2)) * xr_structure.isel(sigma_half=0)
 
 # Heating forcing
-Q0 = 1. # 1 K/day heating rate
+Q0 = 1./86400 # 1 K/day heating rate
 deltalat = 9.
 deltalon = 9.
 Qdiab = Q0 * np.exp(-(xr_structure.sigma_half-0.5)**2/(2*0.1**2)) * np.exp(-xr_structure.lat**2/(2*deltalat**2)) * np.exp(-xr_structure.lon**2/(2*deltalon**2))

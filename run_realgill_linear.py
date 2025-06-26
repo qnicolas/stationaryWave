@@ -5,13 +5,22 @@ from stationarywave import StationaryWaveProblem
 sph_resolution = 32; Nsigma = 12; linear = True; zonal_basic_state = True
 output_dir = "/net/helium/atmosdyn/qnicolas/stationarywave_snapshots/"; case_name = "realgill"
 
-realgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name)
+# damping as in Ting&Yu 1998
+damping_timescale = np.ones(Nsigma) * 15
+damping_timescale[-1] = 0.2
+damping_timescale[-2] = 1.
+
+realgill_linear = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, 
+                                         hyperdiffusion_coefficient=1e17,
+                                         rayleigh_damping_timescale=damping_timescale,
+                                         newtonian_cooling_timescale=damping_timescale
+                                        )
 
 basicstate = xr.open_dataset("era5_basicstate.nc").rename(latitude='lat',level='pressure').transpose('pressure','lat')
 realgill_linear.initialize_basic_state_from_pressure_data(basicstate)
 
 # Define forcing
-Q0 = 2.  # 2 K/day heating rate
+Q0 = 2. / 86400  # 2 K/day heating rate
 sigma_half = (np.arange(Nsigma) + 0.5) / Nsigma
 lat = np.linspace(-90,90,91)
 lon = np.linspace(-180,180,181)

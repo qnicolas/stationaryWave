@@ -1,24 +1,32 @@
-###########################################################################
-# Sigma-level stationary wave model on the sphere                         #
-# Inspired from Ting & Yu (1998, JAS).                                    #
-# Model has a variable number of sigma levels (N)                         #
-# and uses spherical harmonics in the horizontal.                         #
-# Prognostic variables are horizontal velocity at each level (u,v)_i,     #
-# temperature T_i, and perturbation-log-surface-pressure lnps.            #
-#                                                                         #
-# TODO: Nonlinear extension, test initialize_forcings_from_pressure_data, add some attributes to the output,
-#                                                                         #
-# A steady-state should be reached after a few days of integration, typically 20-50?       #
-#                                                                         #
-# Example run script:      
-# 
-# TO BE WRITTEN
-# 
-# mpiexec -n {number of cores} python example_script.py {0 or 1} #
-# the last argument stands for restart (0 for initial run, 1 for          #
-# restart run)                                                            #
-###########################################################################
-
+##########################################################################################
+# Sigma-level stationary wave model on the sphere                                        #
+# Inspired from Ting & Yu (1998, JAS).                                                   #
+# Model has a variable number of sigma levels (N)                                        #
+# and uses spherical harmonics in the horizontal.                                        #
+# Prognostic variables are horizontal velocity at each level (u,v)_i,                    #
+# temperature T_i, and perturbation-log-surface-pressure lnps.                           #
+#                                                                                        #
+# TODO: Nonlinear extension, add some attributes to the output,                          #
+# add nonuniform sigma levels                                                            #
+#                                                                                        #
+# A steady-state should be reached after a few days of integration, typically 20-50      #
+#                                                                                        #
+# Example run script:                                                                    #
+#                                                                                        #
+## sph_resolution = 16; Nsigma = 5; linear = True; zonal_basic_state = True              #
+## output_dir = "data/"; case_name = "test"                                              #
+## exampleRun = StationaryWaveProblem(sph_resolution, Nsigma, linear, zonal_basic_state, #
+##                                    output_dir, case_name)                             #
+## basicstate = xr.open_dataset("example_basicstate.nc")                                 #
+## exampleRun.initialize_basic_state_from_pressure_data(basicstate)                      #
+## forcing = xr.open_dataset("example_forcing.nc")                                       #
+## exampleRun.initialize_forcings_from_pressure_data(forcing)                            #
+## exampleRun.integrate()                                                                #
+#                                                                                        #
+# To run in parallel, call                                                               #
+# mpiexec -n {number of cores} python example_script.py                                  #
+# Author: Q. Nicolas                                                                     #
+##########################################################################################
 
 import numpy as np
 import dedalus.public as d3
@@ -54,7 +62,11 @@ class StationaryWaveProblem:
     Handles the setup of spherical coordinates and bases, defines the problem equations,
     initializes the basic state and forcing fields, and integrates the problem.
     """
-    def __init__(self, resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, hyperdiffusion_coefficient=1e17, damping_timescales=[15, 1.0, 0.2]):
+    def __init__(self, resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, 
+                 hyperdiffusion_coefficient=1e17, 
+                 rayleigh_damping_timescale=25, 
+                 newtonian_cooling_timescale=15
+                ):
         """
         Initialize the stationary wave problem with given parameters.
 
@@ -74,9 +86,12 @@ class StationaryWaveProblem:
             Name of the run, used to name output files.
         hyperdiffusion_coefficient : float
             Hyperdiffusion coefficient in m^4/s (default: 1e17).
-        damping_timescales : list
-            List of three damping timescales in days for the Rayleigh damping: for the Nsigma-2 topmost levels, 
-            the second bottom-most level, and the bottom-most level, respectively.
+        rayleigh_damping_timescale : float or array-like; default: 25
+            Rayleigh damping timescale in days. If one value is passed, it is applied uniformly in the vertical.
+            Otherwise, must be an array of size Nsigma listing values from the topmost to the bottom-most levels.
+        newtonian_cooling_timescale : float or array-like; default: 15
+            Newtonian cooling timescale in days. If one value is passed, it is applied uniformly in the vertical.
+            Otherwise, must be an array of size Nsigma listing values from the topmost to the bottom-most levels.            
         """
         self.resolution = resolution
         self.Nsigma = Nsigma
@@ -88,10 +103,21 @@ class StationaryWaveProblem:
         self.output_dir = output_dir
         self.case_name = case_name
 
-        # Rayleigh_damping_coefficients as in equation 1 of Ting&Yu 1998
-        self.rayleigh_damping_coefficients = np.ones(self.Nsigma)/(damping_timescales[0]*day)
-        self.rayleigh_damping_coefficients[self.Nsigma-2] = 1/(damping_timescales[1]*day)
-        self.rayleigh_damping_coefficients[self.Nsigma-1] = 1/(damping_timescales[2]*day)      
+        rayleigh_damping_timescale = np.array(rayleigh_damping_timescale)
+        if len(rayleigh_damping_timescale.shape) == 0: # one float/int value was passed
+            self.rayleigh_damping_coefficients = np.ones(self.Nsigma)/(rayleigh_damping_timescale*day)
+        else:
+            assert len(rayleigh_damping_timescale) == Nsigma,\
+            f"rayleigh_damping_timescale must be one value or an array of size Nsigma, got array of length {len(rayleigh_damping_timescale)}"
+            self.rayleigh_damping_coefficients = 1/(rayleigh_damping_timescale*day) 
+
+        newtonian_cooling_timescale = np.array(newtonian_cooling_timescale)
+        if len(newtonian_cooling_timescale.shape) == 0: # one float/int value was passed
+            self.newtonian_cooling_coefficients = np.ones(self.Nsigma)/(newtonian_cooling_timescale*day)
+        else:
+            assert len(newtonian_cooling_timescale) == Nsigma,\
+            f"newtonian_cooling_timescale must be one value or an array of size Nsigma, got array of length {len(newtonian_cooling_timescale)}"
+            self.newtonian_cooling_coefficients = 1/(newtonian_cooling_timescale*day) 
 
         # Setup the horizontal grid and vertical grid
         self._setup_horizontal_grid()
@@ -180,9 +206,10 @@ class StationaryWaveProblem:
         """
         Setup the vertical grid, instantiate all fields, and lay out the problem equations.
         """
-        # hyperdiffusion & Rayleigh damping 
+        # hyperdiffusion, Rayleigh damping & Newtonian cooling
         nu = self.hyperdiffusion_coefficient * meter**4 / second 
-        epsilon = self.rayleigh_damping_coefficients 
+        epsilon_mom = self.rayleigh_damping_coefficients 
+        epsilon_T = self.newtonian_cooling_coefficients 
 
         # cross product by zhat times sin(latitude) for Coriolis force
         zcross = lambda A: d3.MulCosine(d3.skew(A))
@@ -197,8 +224,11 @@ class StationaryWaveProblem:
         # Fields
         u_names        = [f"u{i}" for i in range(1,self.Nsigma+1)]             # Perturbation velocity
         T_names        = [f"T{i}" for i in range(1,self.Nsigma+1)]             # Perturbation temperature
-        Qdiab_names    = [f"Qdiab{i}" for i in range(1,self.Nsigma+1)]         # Diabatic forcing
 
+        EMFD_names     = [f"EMFD{i}" for i in range(1,self.Nsigma+1)]          # Eddy momentum flux divergence
+        Qdiab_names    = [f"Qdiab{i}" for i in range(1,self.Nsigma+1)]         # Diabatic forcing
+        EHFD_names     = [f"EHFD{i}" for i in range(1,self.Nsigma+1)]          # Eddy heat flux divergence
+        
         ubar_names        = [f'ubar{i}' for i in range(1,self.Nsigma+1)]       # Basic-state velocity
         Tbar_names        = [f'Tbar{i}' for i in range(1,self.Nsigma+1)]       # Basic-state temperature
         sigmadotbar_names = [f"sigmadotbar{i}" for i in range(1,self.Nsigma)]  # Basic-state sigma-velocity
@@ -209,8 +239,10 @@ class StationaryWaveProblem:
         lnps         = self.dist.Field(name='lnps'  , bases=self.full_basis)                                             # Perturbation log-surface-pressure
 
         # Instantiate forcing fields
-        Qdiabs       = {name: self.dist.Field(name=name, bases=self.full_basis) for name in Qdiab_names } # Diabatic forcing
-        Phisfc       =  self.dist.Field(name='Phisfc', bases=self.full_basis)                      # Surface geopotential
+        EMFDs        = {name: self.dist.VectorField(self.coords, name=name, bases=self.full_basis) for name in EMFD_names } # Eddy momentum flux divergence
+        Qdiabs       = {name: self.dist.Field(name=name, bases=self.full_basis) for name in Qdiab_names }                   # Diabatic forcing
+        EHFDs        = {name: self.dist.Field(name=name, bases=self.full_basis) for name in EHFD_names }                    # Eddy heat flux divergence
+        Phisfc       =  self.dist.Field(name='Phisfc', bases=self.full_basis)                                               # Surface geopotential
 
         # Instantiate basic-state fields
         if self.zonal_basic_state:
@@ -223,7 +255,7 @@ class StationaryWaveProblem:
         lnpsbar      =  self.dist.Field(name='lnpsbar'  , bases=basis_basestate)                                            # Basic-state log-surface-pressure
 
         # Gather all 3D variables 
-        self.vars  = {**us, **Ts, **Qdiabs, **ubars, **Tbars, **sigmadotbars, 'lnps': lnps, 'lnpsbar': lnpsbar, 'Phisfc': Phisfc}
+        self.vars  = {**us, **Ts, **Qdiabs, **EMFDs, **EHFDs, **ubars, **Tbars, **sigmadotbars, 'lnps': lnps, 'lnpsbar': lnpsbar, 'Phisfc': Phisfc}
 
         ###################################################
         ################ PROBLEM EQUATIONS ################
@@ -260,13 +292,13 @@ class StationaryWaveProblem:
                 expansion = f"kappa/(deltasigma*({i}-0.5))*(Tbar{i}*({self._sigmadot(i)}+{self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i}+sigmadotbar{i-1})/2)"
                 
             LHS_mom = f"dt(u{i}) \
-                + epsilon[{i-1}] * u{i} \
+                + epsilon_mom[{i-1}] * u{i} \
                 + nu * lap(lap(u{i})) \
                 + grad( ({self._Phiprime(i-1)}+{self._Phiprime(i)}) / 2 ) \
                 + 2 * Omega * zcross(u{i})"
             
             LHS_T = f"dt(T{i}) \
-                + epsilon[{i-1}] * T{i} \
+                + epsilon_T[{i-1}] * T{i} \
                 + nu * lap(lap(T{i}))"
 
             minus_RHS_mom = f"( ubar{i}@grad(u{i})\
@@ -285,20 +317,20 @@ class StationaryWaveProblem:
                 - kappa * Tbar{i} * u{i}@grad(lnpsbar)\
                 - kappa * Tbar{i} * ubar{i}@grad(lnps) )"
             
-            forcing_mom = "-grad(Phisfc)"
+            forcing_mom = f"-grad(Phisfc) - EMFD{i}"
 
-            forcing_T = f"Qdiab{i}"
+            forcing_T = f"Qdiab{i} - EHFD{i}"
 
             if self.zonal_basic_state: #All terms with non-constant coefficients from the basic state go on the LHS
                 # Momentum equation
-                self.problem.add_equation(LHS_mom + "+" + minus_RHS_mom + " = " + forcing_mom)
+                self.problem.add_equation(f"{LHS_mom} + {minus_RHS_mom} = {forcing_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(LHS_T + "+" + minus_RHS_T + " = " + forcing_T)
+                self.problem.add_equation(f"{LHS_T} + {minus_RHS_T} = {forcing_T}")
             else:
                 # Momentum equation
-                self.problem.add_equation(LHS_mom + " = " + forcing_mom + " - " + minus_RHS_mom)
+                self.problem.add_equation(f"{LHS_mom} = {forcing_mom} - {minus_RHS_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(LHS_T + " = " + forcing_T + " - " + minus_RHS_T)
+                self.problem.add_equation(f"{LHS_T} = {forcing_T} - {minus_RHS_T}")
 
     def initialize_basic_state_from_sigma_data(self,input_data):
         """
@@ -396,9 +428,12 @@ class StationaryWaveProblem:
         Parameters:
         -----------
         input_data : xarray.Dataset
-            Dataset containing the forcing fields (ZSFC, QDIAB).
+            Dataset containing the forcing fields (ZSFC, QDIAB, EHFD, EMFD_U, EMFD_V).
             ZSFC is the surface height in m and must have dimensions (lat, lon)
-            QDIAB is the diabatic heating rate in K/day and must have dimensions (sigma_half, lat, lon).
+            QDIAB is the diabatic heating rate in K/s and must have dimensions (sigma_half, lat, lon).
+            EHFD is the eddy heat flux divergence in K/s and must have dimensions (sigma_half, lat, lon).
+            EMFD_U is the eddy divergence of zonal momentum flux in m/s^2 and must have dimensions (sigma_half, lat, lon).
+            EMFD_V is the eddy divergence of meridional momentum flux in m/s^2 and must have dimensions (sigma_half, lat, lon).
         """
         # Get coordinate values
         phi, theta = self.dist.local_grids(self.full_basis)
@@ -411,12 +446,15 @@ class StationaryWaveProblem:
         local_grid_xr = xr.DataArray(np.zeros(lat_deg.shape),coords={'lon':lon_deg[:,0],'lat':lat_deg[0]},dims=['lon','lat'])
 
         input_data_itp = input_data.interp_like(local_grid_xr, method='linear').transpose('sigma_half','lon','lat')
-
+        
         # Topographic forcing
         self.vars['Phisfc']['g'] = input_data_itp.ZSFC.data * meter * consts['g'] 
-        # Diabatic heating forcing
+        # Diabatic heating and eddy flux forcing
         for i in range(1,self.Nsigma+1):
-            self.vars[f'Qdiab{i}']['g'] = input_data_itp.QDIAB.isel(sigma_half=i-1).data * Kelvin / day
+            self.vars[f'Qdiab{i}']['g'] = input_data_itp.QDIAB.isel(sigma_half=i-1).data * Kelvin / second
+            self.vars[f'EHFD{i}']['g'] = input_data_itp.EHFD.isel(sigma_half=i-1).data * Kelvin / second
+            self.vars[f'EMFD{i}']['g'] = np.stack([ input_data_itp.EMFD_U.isel(sigma_half=i-1).data,
+                                                   -input_data_itp.EMFD_V.isel(sigma_half=i-1).data ], axis=0) * meter / second ** 2
 
     def initialize_forcings_from_pressure_data(self,input_data):
         """
@@ -427,15 +465,21 @@ class StationaryWaveProblem:
         Parameters:
         -----------
         input_data : xarray.Dataset
-            Dataset containing the forcing fields (ZSFC, QDIAB) on pressure levels. 
+            Dataset containing the forcing fields (ZSFC, QDIAB, EHFD, EMFD_U, EMFD_V)
+            on pressure levels, plus surface pressure SP.
+            pressure is supposed to be in hPa to match most reanalysis datasets.
+            SP is the surface pressure in Pa and must have dimensions (lat, lon)
             ZSFC is the surface height in m and must have dimensions (lat, lon)
             QDIAB is the diabatic heating rate in K/day and must have dimensions (pressure, lat, lon).
+            EHFD is the eddy heat flux divergence in K/s and must have dimensions (pressure, lat, lon).
+            EMFD_U is the eddy divergence of zonal momentum flux in m/s^2 and must have dimensions (pressure, lat, lon).
+            EMFD_V is the eddy divergence of meridional momentum flux in m/s^2 and must have dimensions (pressure, lat, lon).
         """
 
         input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
         input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma,sig,y),
                                              input_data.sigma,
-                                             input_data[['QDIAB',]],
+                                             input_data[['QDIAB','EHFD','EMFD_U','EMFD_V']],
                                              input_core_dims=(('pressure',),('pressure',)),
                                              output_core_dims=(('sigma_half',),),
                                              vectorize=True)
@@ -444,7 +488,7 @@ class StationaryWaveProblem:
                                     input_data.ZSFC)
                                     )
 
-        self.initialize_basic_state_from_sigma_data(input_data_vitp)
+        self.initialize_forcings_from_sigma_data(input_data_vitp)
 
     def _calc_omega(self,i):
         """
@@ -493,8 +537,10 @@ class StationaryWaveProblem:
             # Vorticity
             self.snapshots.add_task(-d3.div(d3.skew(self.vars[f'u{i}'])) / (1/second), name=f'zeta{i}') 
 
-            # Diabatic heating
-            self.snapshots.add_task(self.vars[f'Qdiab{i}'] / Kelvin * day, name=f'Qdiab{i}')
+            # Forcings
+            self.snapshots.add_task(self.vars[f'Qdiab{i}'] / Kelvin * second, name=f'Qdiab{i}')
+            self.snapshots.add_task(self.vars[f'EHFD{i}'] / Kelvin * second, name=f'EHFD{i}')
+            self.snapshots.add_task(self.vars[f'EMFD{i}'] / (meter / second**2), name=f'EMFD{i}')
 
             # Basic-state variables
             self.snapshots.add_task(self.vars[f'ubar{i}'] / (meter / second), name=f'ubar{i}')
@@ -541,7 +587,7 @@ class StationaryWaveProblem:
         snapshot_id = f'stationarywave_{self.Nsigma}level_T{self.resolution}_{self.case_name}'
 
         # Save snapshots every 6h of model time
-        self.snapshots = self.solver.evaluator.add_file_handler(self.output_dir+snapshot_id, sim_dt=3600 * second, mode=file_handler_mode)
+        self.snapshots = self.solver.evaluator.add_file_handler(self.output_dir+snapshot_id, sim_dt=6 * 3600 * second, mode=file_handler_mode)  
         self._configure_snapshots()
 
         # CFL

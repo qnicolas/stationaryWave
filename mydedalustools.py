@@ -94,7 +94,7 @@ def calc_helmholtz(u_xr):
     args:
         - u_xr: xarray.DataArray, that comes from the output of a dedalus simulation
         (opened using open_h5s and concat_levels).
-        Note u should not depend on time, and should be nondimensional.
+        Note u should not depend on time.
     returns:
         - xarray.Dataset with four variables: u_rot (rotational part of u), 
         u_div (divergent part of u), div (divergence of u), and psi (streamfunction)

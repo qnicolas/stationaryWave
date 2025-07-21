@@ -99,7 +99,7 @@ class StationaryWaveProblem:
         
         self.zonal_basic_state = zonal_basic_state
         self.linear = linear
-        self.hyperdiffusion_coefficient = hyperdiffusion_coefficient  # Hyperdiffusion coefficient in m^4/s
+        self.hyperdiffusion_coefficient = hyperdiffusion_coefficient * meter**4 / second
         self.output_dir = output_dir
         self.case_name = case_name
 
@@ -143,7 +143,7 @@ class StationaryWaveProblem:
         if self.linear:
             dealias = (1, 1)
         else:
-            dealias = (3/2, 3/2) # Delaiasing factor appropriate for order 2 nonlinearlities 
+            dealias = (3/2, 3/2) # Delaiasing factor appropriate for order 2 nonlinearities 
 
         # Spherical coordinates / bases
         self.coords = d3.S2Coordinates('phi', 'theta')
@@ -169,6 +169,14 @@ class StationaryWaveProblem:
         sum_ubars = "+".join([f"ubar{j}" for j in range(1,self.Nsigma+1)])
         return f"(- deltasigma * (div({sum_us}) + ({sum_us})@grad(lnpsbar) + ({sum_ubars})@grad(lnps)))"
 
+    def _utilde(self):
+        sum_us    = "+".join([f"u{j}"  for j in range(1,self.Nsigma+1)])
+        return f"deltasigma * ({sum_us})"
+    
+    def _ubartilde(self):
+        sum_ubars = "+".join([f"ubar{j}" for j in range(1,self.Nsigma+1)])
+        return f"deltasigma * ({sum_ubars})"
+    
     def _sigmadot(self,i):
         """
         Outputs a str that expresses the sigma-vertical-velocity at level i as a function of problem variables
@@ -180,10 +188,14 @@ class StationaryWaveProblem:
         i : int
             The index of the half sigma level (1 to Nsigma).
         """
-        #"""Function to compute the sigma-vertical-velocity at level i"""
         partialsum_us = "+".join([f"u{j}"  for j in range(1,i+1)])
         partialsum_ubars = "+".join([f"ubar{j}" for j in range(1,i+1)])
-        return f"(-{i}*deltasigma*{self._dlnps_dt()} - deltasigma * (div({partialsum_us}) + ({partialsum_us})@grad(lnpsbar) + ({partialsum_ubars})@grad(lnps)))"
+
+        int_u_minus_utilde     = f"deltasigma * ({partialsum_us} - {i} * {self._utilde()})"
+        int_u_minus_utilde_bar = f"deltasigma * ({partialsum_ubars} - {i} * {self._ubartilde()})"
+        int_d_minus_dtilde     = f"div({int_u_minus_utilde})"
+
+        return f"(- ({int_u_minus_utilde})@grad(lnpsbar) - ({int_u_minus_utilde_bar})@grad(lnps) - {int_d_minus_dtilde})"
 
     def _Phiprime(self,i):
         """
@@ -207,9 +219,10 @@ class StationaryWaveProblem:
         Setup the vertical grid, instantiate all fields, and lay out the problem equations.
         """
         # hyperdiffusion, Rayleigh damping & Newtonian cooling
-        nu = self.hyperdiffusion_coefficient * meter**4 / second 
+        nu = self.hyperdiffusion_coefficient
         epsilon_mom = self.rayleigh_damping_coefficients 
         epsilon_T = self.newtonian_cooling_coefficients 
+        epsilon_zonalmean = 1 / (3 * day)
 
         # cross product by zhat times sin(latitude) for Coriolis force
         zcross = lambda A: d3.MulCosine(d3.skew(A))
@@ -253,6 +266,13 @@ class StationaryWaveProblem:
         Tbars        = {name: self.dist.Field(name=name, bases=basis_basestate) for name in Tbar_names }                    # Basic-state temperature
         sigmadotbars = {name: self.dist.Field(name=name, bases=basis_basestate) for name in sigmadotbar_names }             # Basic-state sigma-velocity
         lnpsbar      =  self.dist.Field(name='lnpsbar'  , bases=basis_basestate)                                            # Basic-state log-surface-pressure
+        
+        # Create field that is identically equal to one
+        # This is used when relaxing the zonal mean, as Dedalus isn't happy if you 
+        # put fields that live on the zonal basis in the main equations (all fields 
+        # have to live on the full basis)
+        one =    self.dist.Field(name='one'  , bases=self.full_basis)
+        one['g'] = 1.0  
 
         # Gather all 3D variables 
         self.vars  = {**us, **Ts, **Qdiabs, **EMFDs, **EHFDs, **ubars, **Tbars, **sigmadotbars, 'lnps': lnps, 'lnpsbar': lnpsbar, 'Phisfc': Phisfc}
@@ -290,7 +310,7 @@ class StationaryWaveProblem:
                 vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i}) + sigmadotbar{i-1}*(T{i}-T{i-1}) )/deltasigma/2"
                 vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i}) + {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1}) )/deltasigma/2"
                 expansion = f"kappa/(deltasigma*({i}-0.5))*(Tbar{i}*({self._sigmadot(i)}+{self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i}+sigmadotbar{i-1})/2)"
-                
+
             LHS_mom = f"dt(u{i}) \
                 + epsilon_mom[{i-1}] * u{i} \
                 + nu * lap(lap(u{i})) \
@@ -312,25 +332,33 @@ class StationaryWaveProblem:
                 + {vert_advection_T_1}\
                 + {vert_advection_T_2}\
                 - {expansion}\
-                - kappa * Tbar{i} * {self._dlnps_dt()}\
-                - kappa * T{i} * ubar{i}@grad(lnpsbar)\
-                - kappa * Tbar{i} * u{i}@grad(lnpsbar)\
-                - kappa * Tbar{i} * ubar{i}@grad(lnps) )"
+                - kappa * T{i} * (ubar{i} - {self._ubartilde()})@grad(lnpsbar)\
+                - kappa * Tbar{i} * (u{i} - {self._utilde()})@grad(lnpsbar)\
+                - kappa * Tbar{i} * (ubar{i} - {self._ubartilde()})@grad(lnps)\
+                + kappa * Tbar{i} * div({self._utilde()})\
+                + kappa * T{i} * div({self._ubartilde()}) )"
+                # - kappa * Tbar{i} * {self._dlnps_dt()}\
+                # - kappa * T{i} * ubar{i}@grad(lnpsbar)\
+                # - kappa * Tbar{i} * u{i}@grad(lnpsbar)\
+                # - kappa * Tbar{i} * ubar{i}@grad(lnps) )"
             
             forcing_mom = f"-grad(Phisfc) - EMFD{i}"
 
             forcing_T = f"Qdiab{i} - EHFD{i}"
 
+            zonal_mean_relaxation_u = f"- epsilon_zonalmean * Average(u{i},'phi') * one"
+            zonal_mean_relaxation_T = f"- epsilon_zonalmean * Average(T{i},'phi') * one"
+
             if self.zonal_basic_state: #All terms with non-constant coefficients from the basic state go on the LHS
                 # Momentum equation
-                self.problem.add_equation(f"{LHS_mom} + {minus_RHS_mom} = {forcing_mom}")
+                self.problem.add_equation(f"{LHS_mom} + {minus_RHS_mom} = {zonal_mean_relaxation_u} + {forcing_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(f"{LHS_T} + {minus_RHS_T} = {forcing_T}")
+                self.problem.add_equation(f"{LHS_T} + {minus_RHS_T} = {zonal_mean_relaxation_T} + {forcing_T}")
             else:
                 # Momentum equation
-                self.problem.add_equation(f"{LHS_mom} = {forcing_mom} - {minus_RHS_mom}")
+                self.problem.add_equation(f"{LHS_mom} = {zonal_mean_relaxation_u} + {forcing_mom} - {minus_RHS_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(f"{LHS_T} = {forcing_T} - {minus_RHS_T}")
+                self.problem.add_equation(f"{LHS_T} = {zonal_mean_relaxation_T} + {forcing_T} - {minus_RHS_T}")
 
     def initialize_basic_state_from_sigma_data(self,input_data):
         """

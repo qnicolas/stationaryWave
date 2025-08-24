@@ -62,7 +62,7 @@ class StationaryWaveProblem:
     Handles the setup of spherical coordinates and bases, defines the problem equations,
     initializes the basic state and forcing fields, and integrates the problem.
     """
-    def __init__(self, resolution, Nsigma, linear, zonal_basic_state, output_dir, case_name, 
+    def __init__(self, resolution, sigma_full, linear, zonal_basic_state, output_dir, case_name, 
                  hyperdiffusion_coefficient=1e17, 
                  rayleigh_damping_timescale=25, 
                  newtonian_cooling_timescale=15
@@ -74,8 +74,8 @@ class StationaryWaveProblem:
         ------------
         resolution : int
             Maximum degree & order in the spherical harmonic expansion. Akin to the order of a triangular truncation.
-        Nsigma : int
-            Number of half sigma levels in the vertical grid.
+        sigma_full : array-like
+            Vertical grid, given as an array of the full sigma levels (sorted increasingly, from 0 to 1).
         linear : bool 
             Whether to include nonlinear terms in the equations.
         zonal_basic_state : bool
@@ -94,8 +94,11 @@ class StationaryWaveProblem:
             Otherwise, must be an array of size Nsigma listing values from the topmost to the bottom-most levels.            
         """
         self.resolution = resolution
-        self.Nsigma = Nsigma
-        self.deltasigma = 1/self.Nsigma
+
+        assert np.all(np.diff(sigma_full) >= 0), "sigma_full must be sorted increasingly."
+        assert (len(sigma_full) >= 3) and sigma_full[0]==0. and sigma_full[-1]==1., "sigma_full must have at least three values, including 0 and 1"
+        self.sigma_full = np.array(sigma_full)
+        self.Nsigma = len(sigma_full)-1
         
         self.zonal_basic_state = zonal_basic_state
         self.linear = linear
@@ -107,16 +110,16 @@ class StationaryWaveProblem:
         if len(rayleigh_damping_timescale.shape) == 0: # one float/int value was passed
             self.rayleigh_damping_coefficients = np.ones(self.Nsigma)/(rayleigh_damping_timescale*day)
         else:
-            assert len(rayleigh_damping_timescale) == Nsigma,\
-            f"rayleigh_damping_timescale must be one value or an array of size Nsigma, got array of length {len(rayleigh_damping_timescale)}"
+            assert len(rayleigh_damping_timescale) == self.Nsigma,\
+            f"rayleigh_damping_timescale must be one value or an array of size Nsigma ({self.Nsigma}), got array of length {len(rayleigh_damping_timescale)}"
             self.rayleigh_damping_coefficients = 1/(rayleigh_damping_timescale*day) 
 
         newtonian_cooling_timescale = np.array(newtonian_cooling_timescale)
         if len(newtonian_cooling_timescale.shape) == 0: # one float/int value was passed
             self.newtonian_cooling_coefficients = np.ones(self.Nsigma)/(newtonian_cooling_timescale*day)
         else:
-            assert len(newtonian_cooling_timescale) == Nsigma,\
-            f"newtonian_cooling_timescale must be one value or an array of size Nsigma, got array of length {len(newtonian_cooling_timescale)}"
+            assert len(newtonian_cooling_timescale) == self.Nsigma,\
+            f"newtonian_cooling_timescale must be one value or an array of size Nsigma ({self.Nsigma}), got array of length {len(newtonian_cooling_timescale)}"
             self.newtonian_cooling_coefficients = 1/(newtonian_cooling_timescale*day) 
 
         # Setup the horizontal grid and vertical grid
@@ -153,29 +156,29 @@ class StationaryWaveProblem:
 
     def _setup_vertical_grid(self):
         """
-        Setup the vertical grid for the simulation. We use uniformly spaced sigma levels.
+        Calculate half sigma levels and layer depths from the full sigma levels
         """
-        self.sigma = (np.arange(self.Nsigma) + 0.5) * self.deltasigma # Half levels
-        self.sigma_full = np.arange(1,self.Nsigma) * self.deltasigma # Full levels, excluding surface and model top
+        self.sigma_half = (self.sigma_full[1:] + self.sigma_full[:-1])/2 # Half levels
+        self.deltasigma_full = self.sigma_full[1:] - self.sigma_full[:-1]
+        self.deltasigma_half = self.sigma_half[1:] - self.sigma_half[:-1]
 
-    # The following three functions are used in the formulation of the problem equations
+    # The following functions are used in the formulation of the problem equations
+    def _utilde(self):
+        vint_us    = "+".join([f"self.deltasigma_full[{j-1}] * u{j}"  for j in range(1,self.Nsigma+1)])
+        return f"({vint_us})"
+    
+    def _ubartilde(self):
+        vint_ubars = "+".join([f"self.deltasigma_full[{j-1}] * ubar{j}" for j in range(1,self.Nsigma+1)])
+        return f"({vint_ubars})"
+    
     def _dlnps_dt(self):
         """
         Outputs a str that expresses the log surface pressure tendency as a function of problem variables
         (perturbation log surface pressure lnps, basic-state log surface pressure lnpsbar,
         perturbation velocities u, basic-state velocities ubar).
         """
-        sum_us    = "+".join([f"u{j}"  for j in range(1,self.Nsigma+1)])
-        sum_ubars = "+".join([f"ubar{j}" for j in range(1,self.Nsigma+1)])
-        return f"(- deltasigma * (div({sum_us}) + ({sum_us})@grad(lnpsbar) + ({sum_ubars})@grad(lnps)))"
+        return f"(- (div({self._utilde()}) + {self._utilde()}@grad(lnpsbar) + {self._ubartilde()}@grad(lnps)))"
 
-    def _utilde(self):
-        sum_us    = "+".join([f"u{j}"  for j in range(1,self.Nsigma+1)])
-        return f"deltasigma * ({sum_us})"
-    
-    def _ubartilde(self):
-        sum_ubars = "+".join([f"ubar{j}" for j in range(1,self.Nsigma+1)])
-        return f"deltasigma * ({sum_ubars})"
     
     def _sigmadot(self,i):
         """
@@ -188,11 +191,11 @@ class StationaryWaveProblem:
         i : int
             The index of the half sigma level (1 to Nsigma).
         """
-        partialsum_us = "+".join([f"u{j}"  for j in range(1,i+1)])
-        partialsum_ubars = "+".join([f"ubar{j}" for j in range(1,i+1)])
+        partial_vint_us = "+".join([f"self.deltasigma_full[{j-1}] * u{j}"  for j in range(1,i+1)])
+        partial_vint_ubars = "+".join([f"self.deltasigma_full[{j-1}] * ubar{j}" for j in range(1,i+1)])
 
-        int_u_minus_utilde     = f"deltasigma * ({partialsum_us} - {i} * {self._utilde()})"
-        int_u_minus_utilde_bar = f"deltasigma * ({partialsum_ubars} - {i} * {self._ubartilde()})"
+        int_u_minus_utilde     = f"({partial_vint_us} - self.sigma_full[{i}] * {self._utilde()})"
+        int_u_minus_utilde_bar = f"({partial_vint_ubars} - self.sigma_full[{i}] * {self._ubartilde()})"
         int_d_minus_dtilde     = f"div({int_u_minus_utilde})"
 
         return f"(- ({int_u_minus_utilde})@grad(lnpsbar) - ({int_u_minus_utilde_bar})@grad(lnps) - {int_d_minus_dtilde})"
@@ -211,7 +214,7 @@ class StationaryWaveProblem:
         if i==self.Nsigma:
             return 0.
         else:
-            partialsum = "+".join([f"T{j}/({j}-0.5)" for j in range(i+1,self.Nsigma+1)])
+            partialsum = "+".join([f"self.deltasigma_full[{j-1}] * T{j}/self.sigma_half[{j-1}]" for j in range(i+1,self.Nsigma+1)])
             return f"(Rd * ({partialsum}))"
 
     def _setup_problem(self):
@@ -228,8 +231,6 @@ class StationaryWaveProblem:
         zcross = lambda A: d3.MulCosine(d3.skew(A))
 
         # Constants that appear in the problem equations
-        sigma = self.sigma
-        deltasigma = self.deltasigma
         kappa = consts['Rd'] / consts['cp']  
         Rd = consts['Rd'] 
         Omega = consts['Omega'] 
@@ -293,23 +294,23 @@ class StationaryWaveProblem:
         for i in range(1,self.Nsigma+1):
             # Build terms that involve vertical differentiation/staggering - different treatment for upper and lower boundaries
             if i==1:
-                vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i})    )/deltasigma/2"
-                vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i}) )/deltasigma/2"
-                vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})    )/deltasigma/2"
-                vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i}) )/deltasigma/2"
-                expansion = f"kappa/(deltasigma*({i}-0.5))*(Tbar{i}*({self._sigmadot(i)})/2 + T{i}*(sigmadotbar{i})/2)"
+                vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i})/self.deltasigma_half[{i-1}] )/2"
+                vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i})/self.deltasigma_half[{i-1}] )/2"
+                vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})/self.deltasigma_half[{i-1}] )/2"
+                vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i})/self.deltasigma_half[{i-1}] )/2"
+                expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i)})/2 + T{i}*(sigmadotbar{i})/2)"
             elif i==self.Nsigma:
-                vert_advection_mom_1 = f"( sigmadotbar{i-1}*(u{i}-u{i-1})    )/deltasigma/2"
-                vert_advection_mom_2 = f"( {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1}) )/deltasigma/2"
-                vert_advection_T_1   = f"( sigmadotbar{i-1}*(T{i}-T{i-1})    )/deltasigma/2"
-                vert_advection_T_2   = f"( {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1}) )/deltasigma/2"
-                expansion = f"kappa/(deltasigma*({i}-0.5))*(Tbar{i}*({self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i-1})/2)"
+                vert_advection_mom_1 = f"( sigmadotbar{i-1}*(u{i}-u{i-1})/self.deltasigma_half[{i-2}] )/2"
+                vert_advection_mom_2 = f"( {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1})/self.deltasigma_half[{i-2}] )/2"
+                vert_advection_T_1   = f"( sigmadotbar{i-1}*(T{i}-T{i-1})/self.deltasigma_half[{i-2}] )/2"
+                vert_advection_T_2   = f"( {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] )/2"
+                expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i-1})/2)"
             else:
-                vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i}) + sigmadotbar{i-1}*(u{i}-u{i-1}) )/deltasigma/2"
-                vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i}) + {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1}) )/deltasigma/2"
-                vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i}) + sigmadotbar{i-1}*(T{i}-T{i-1}) )/deltasigma/2"
-                vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i}) + {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1}) )/deltasigma/2"
-                expansion = f"kappa/(deltasigma*({i}-0.5))*(Tbar{i}*({self._sigmadot(i)}+{self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i}+sigmadotbar{i-1})/2)"
+                vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i})/self.deltasigma_half[{i-1}] + sigmadotbar{i-1}*(u{i}-u{i-1})/self.deltasigma_half[{i-2}] )/2"
+                vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i})/self.deltasigma_half[{i-1}] + {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1})/self.deltasigma_half[{i-2}] )/2"
+                vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})/self.deltasigma_half[{i-1}] + sigmadotbar{i-1}*(T{i}-T{i-1})/self.deltasigma_half[{i-2}] )/2"
+                vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i})/self.deltasigma_half[{i-1}] + {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] )/2"
+                expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i)}+{self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i}+sigmadotbar{i-1})/2)"
 
             LHS_mom = f"dt(u{i}) \
                 + epsilon_mom[{i-1}] * u{i} \
@@ -380,8 +381,8 @@ class StationaryWaveProblem:
         lat_deg = (np.pi / 2 - theta + 0*phi) * 180 / np.pi 
         lon_deg = (phi-np.pi) * 180 / np.pi
 
-        assert np.allclose(input_data.sigma_half.data, self.sigma     ), "Input data sigma levels must match model sigma levels."
-        assert np.allclose(input_data.sigma_full.data, self.sigma_full), "Input data sigma levels must match model sigma levels."
+        assert np.allclose(input_data.sigma_half.data, self.sigma_half), "Input data half sigma levels must match model half sigma levels."
+        assert np.allclose(input_data.sigma_full.data, self.sigma_full[1:-1]), "Input data full sigma levels must match model full sigma levels (excluding sigma=0 and sigma=1)."
         
         if self.zonal_basic_state:
             assert set(input_data.dims) == {'sigma_half', 'sigma_full', 'lat'}, "Input data must have dimensions {sigma_half, sigma_full, lat} for zonal basic state."
@@ -407,8 +408,9 @@ class StationaryWaveProblem:
         omega_ov_ps = input_data_itp.W/input_data_itp.SP * 1/second
         for i in range(1,self.Nsigma):
             self.vars[f'sigmadotbar{i}']['g'] = omega_ov_ps.isel(sigma_full=i-1).data.reshape(target_shape)
+            alpha_itp = (self.sigma_half[i] - self.sigma_full[i]) / (self.sigma_half[i] - self.sigma_half[i-1])
             self.vars[f'sigmadotbar{i}'] = self.vars[f'sigmadotbar{i}']\
-                - self.sigma_full[i-1] * (self.vars[f'ubar{i}']+self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar']) / 2
+                - self.sigma_full[i] * (alpha_itp * self.vars[f'ubar{i}'] + (1-alpha_itp) * self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar'])
             
     def initialize_basic_state_from_pressure_data(self,input_data):
         """
@@ -428,21 +430,21 @@ class StationaryWaveProblem:
         """
 
         input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
-        input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma,sig,y),
+        input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_half,sig,y),
                                              input_data.sigma,
                                              input_data[['U','V','T']],
                                              input_core_dims=(('pressure',),('pressure',)),
                                              output_core_dims=(('sigma_half',),),
                                              vectorize=True)
-        input_data_fulllevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_full,sig,y),
+        input_data_fulllevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_full[1:-1],sig,y),
                                              input_data.sigma,
                                              input_data[['W',]],
                                              input_core_dims=(('pressure',),('pressure',)),
                                              output_core_dims=(('sigma_full',),),
                                              vectorize=True)
 
-        input_data_vitp = xr.merge((input_data_halflevs.assign_coords(sigma_half=self.sigma),
-                                    input_data_fulllevs.assign_coords(sigma_full=self.sigma_full),
+        input_data_vitp = xr.merge((input_data_halflevs.assign_coords(sigma_half=self.sigma_half),
+                                    input_data_fulllevs.assign_coords(sigma_full=self.sigma_full[1:-1]),
                                     input_data.SP)
                                     )
 
@@ -469,7 +471,7 @@ class StationaryWaveProblem:
         lon_deg = (phi-np.pi) * 180 / np.pi
 
         assert set(input_data.dims) == {'sigma_half', 'lat', 'lon'}, "Input forcings must have dimensions {sigma_half, lat, lon}."
-        assert np.allclose(input_data.sigma_half.data, self.sigma), "Input forcings sigma levels must match model sigma levels."
+        assert np.allclose(input_data.sigma_half.data, self.sigma_half), "Input forcings sigma levels must match model sigma levels."
 
         local_grid_xr = xr.DataArray(np.zeros(lat_deg.shape),coords={'lon':lon_deg[:,0],'lat':lat_deg[0]},dims=['lon','lat'])
 
@@ -505,14 +507,14 @@ class StationaryWaveProblem:
         """
 
         input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
-        input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma,sig,y),
+        input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_half,sig,y),
                                              input_data.sigma,
                                              input_data[['QDIAB','EHFD','EMFD_U','EMFD_V']],
                                              input_core_dims=(('pressure',),('pressure',)),
                                              output_core_dims=(('sigma_half',),),
                                              vectorize=True)
 
-        input_data_vitp = xr.merge((input_data_halflevs.assign_coords(sigma_half=self.sigma),
+        input_data_vitp = xr.merge((input_data_halflevs.assign_coords(sigma_half=self.sigma_half),
                                     input_data.ZSFC)
                                     )
 
@@ -562,8 +564,9 @@ class StationaryWaveProblem:
             self.snapshots.add_task(self.vars[f'u{i}'] / (meter / second), name=f'u{i}')
             self.snapshots.add_task(self.vars[f'T{i}'] / Kelvin, name=f'T{i}')
 
-            # Vorticity
+            # Vorticity, divergence
             self.snapshots.add_task(-d3.div(d3.skew(self.vars[f'u{i}'])) / (1/second), name=f'zeta{i}') 
+            self.snapshots.add_task(d3.div(self.vars[f'u{i}']) / (1/second), name=f'div{i}') 
 
             # Forcings
             self.snapshots.add_task(self.vars[f'Qdiab{i}'] / Kelvin * second, name=f'Qdiab{i}')
@@ -576,8 +579,12 @@ class StationaryWaveProblem:
             if i < self.Nsigma:  # sigmadotbar is only defined for levels 1 to N-1:
                 self.snapshots.add_task(self.vars[f'sigmadotbar{i}'] / (1/second), name=f'sigmadotbar{i}')
             
-        # Add sigma and pressure velocity to snapshots  
+        # Add geopotential & sigma and pressure velocity to snapshots  
         for i in range(1,self.Nsigma):
+            # Geopotential height
+            Rd = consts['Rd'] 
+            self.snapshots.add_task(eval(self._Phiprime(i),self.namespace) / (meter**2 / second**2), name=f'Phiprime{i}')
+
             # What I'm doing here is to calculate sigmadot at level i. 
             # The sigmadot function does exactly that, but outputs a string that goes in the equation formulation
             # What we simply need to do is to transform this string into an actual expression that acts on the fields
@@ -601,7 +608,7 @@ class StationaryWaveProblem:
             - stop_sim_time: float, simulation time in seconds until which to integrate
         """
         # Solver
-        self.solver = self.problem.build_solver(d3.RK222)
+        self.solver = self.problem.build_solver(d3.CNLF2)
         self.solver.stop_sim_time = stop_sim_time * second
         timestep = timestep * second
 
@@ -631,6 +638,9 @@ class StationaryWaveProblem:
             if not self.zonal_basic_state:
                 CFL.add_frequency(self.vars[f'sigmadotbar{i}']/self.deltasigma/2)
 
+        flow = d3.GlobalFlowProperty(self.solver, cadence=10)
+        flow.add_property(self.vars[f'u{1}']@self.vars[f'u{1}'], name='u2')
+
         # Main loop
         with warnings.catch_warnings():
             warnings.filterwarnings('error',category=RuntimeWarning)
@@ -641,6 +651,8 @@ class StationaryWaveProblem:
                         timestep = CFL.compute_timestep()
                     self.solver.step(timestep)
                     if (self.solver.iteration-1) % 20 == 0:
+                        max_u = np.sqrt(flow.max('u2')) / (meter/second)
+                        logger.info('Iteration=%i, Time=%e, dt=%e, max|u|=%f m/s' %(self.solver.iteration, self.solver.sim_time, timestep, max_u))
                         logger.info('Iteration=%i, Time=%e, dt=%e' %(self.solver.iteration, self.solver.sim_time, timestep))
             except:
                 logger.info('Last dt=%e' %(timestep))

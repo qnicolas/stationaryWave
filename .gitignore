@@ -6,6 +6,6 @@ minimalexample.py
 dedalus3_environment_noversions.yml
 .DS_Store
 data/
-test_tyler.ipynb
+tests_tyler.ipynb
 EHFDplus*
 OLDstationarywave.py

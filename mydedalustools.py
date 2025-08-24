@@ -41,7 +41,7 @@ def open_h5s(name,sims,SNAPSHOTS_DIR = ''):
 ########################  N LEVELS  ############################
 ################################################################
 
-def concat_levels(ds,N):
+def concat_levels(ds,N,sigma_full=None):
     """Concatenate sigma-level variables from dedalus output
     stationarywave.py outputs all 3D variables as a list of separate 2D variables,
     one per sigma level (e.g., u1,u2,...,uN).
@@ -51,7 +51,10 @@ def concat_levels(ds,N):
     
     args:
         - ds: xr.DataArray, usually the ouput of open_h5 or open_h5s
-        - N: number of sigma levels
+        - N: number of half sigma levels
+        - sigma_full: optional, if provided, will be used as the sigma coordinate for the output. 
+            Should be an array of length N+1, with the first element being 0 and the last being 1.
+            If not provided, will use equally spaced sigma levels.
     returns:
         - xr.DataArray with each 3D variables concatenated
     """
@@ -62,8 +65,12 @@ def concat_levels(ds,N):
     allvvarnames = [var+str(i) for var in sigma_varnames for i in range(1,N+1)] + [var+str(i) for var in stagger_varnames for i in range(1,N)]
     base = ds.drop(allvvarnames)
     
-    sigma_grid = np.arange(N)/N + 1/(2*N)
-    stagger_grid = np.arange(N-1)/N + 1/N
+    if sigma_full is None:
+        sigma_half = np.arange(N)/N + 1/(2*N)
+        sigma_full = np.arange(N-1)/N + 1/N
+    else:
+        sigma_half = (sigma_full[:-1] + sigma_full[1:]) / 2
+        sigma_full = sigma_full[1:-1]
     sigma_vars=[]
     stagger_vars=[]
     for var in sigma_varnames:
@@ -73,12 +80,12 @@ def concat_levels(ds,N):
         else:
             rname=var
         sigma_vars.append( xr.concat([ds[var+str(i)] for i in range(1,N+1)],
-                                     dim = xr.DataArray(sigma_grid,coords={'sigma': sigma_grid},dims = ['sigma'])
+                                     dim = xr.DataArray(sigma_half,coords={'sigma': sigma_half},dims = ['sigma'])
                                     ).transpose(*dims,'sigma').rename(rname) )
     for var in stagger_varnames:
         dims = ds[var+str(1)].dims
         stagger_vars.append( xr.concat([ds[var+str(i)] for i in range(1,N)],
-                                     dim = xr.DataArray(stagger_grid,coords={'sigma_stag': stagger_grid},dims = ['sigma_stag'])
+                                     dim = xr.DataArray(sigma_full,coords={'sigma_stag': sigma_full},dims = ['sigma_stag'])
                                     ).transpose(*dims,'sigma_stag').rename(var) )
         
     return xr.merge((base,*sigma_vars,*stagger_vars))

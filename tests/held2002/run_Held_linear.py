@@ -1,6 +1,8 @@
 import numpy as np
 import xarray as xr
-from stationarywave import StationaryWaveProblem
+import sys
+sys.path.append('../../')
+from model.stationarywave import StationaryWaveProblem
 
 # import sys
 # case = int(sys.argv[1])
@@ -10,12 +12,12 @@ from stationarywave import StationaryWaveProblem
 # elif case==2:
 #     case_name = "held2002_smoothorog_linear"
 
-case_name = "held2002_idealorog_linear_dampedzonalmean_variablesigma_nozonalmeanforcing_cnlf2_weakdiff"
+case_name = "held2002_onlyheating_linear_dampedzonalmean_variablesigma_nozonalmeanforcing"
 sph_resolution = 32; linear = True; zonal_basic_state = True
 dsigma = np.array([0.,0.03,0.041,0.06,0.079,0.094,0.102,0.108,0.109,0.105,0.097,0.082,0.057,0.029,0.007])
 sigma_full = np.cumsum(dsigma)
 Nsigma = len(sigma_full) - 1
-output_dir = "data/"#"/net/helium/atmosdyn/qnicolas/stationarywave_snapshots/"
+output_dir = "/Users/qnicolas/stationaryWave/data/"#"/net/helium/atmosdyn/qnicolas/stationarywave_snapshots/"
 
 # #/!\/!\/!\/!\/!\/!\ for 24 levels
 # rayleigh_damping_timescale = np.ones(Nsigma) * 25
@@ -36,15 +38,16 @@ held = StationaryWaveProblem(sph_resolution, sigma_full, linear, zonal_basic_sta
                              rayleigh_damping_timescale=rayleigh_damping_timescale,
                              newtonian_cooling_timescale=15)
 
-basicstate = xr.open_dataset("ncep_jan_basic_state.nc")
+basicstate = xr.open_dataset("/Users/qnicolas/stationaryWave/data/inputdata/ncep_jan_basic_state.nc")
 held.initialize_basic_state_from_pressure_data(basicstate)
 
-forcings = xr.open_dataset("ncep_jan_forcings.nc")
-for var in 'QDIAB','EHFD', 'EMFD_U','EMFD_V': #'ZSFC'
+forcings = xr.open_dataset("/Users/qnicolas/stationaryWave/data/inputdata/ncep_jan_forcings.nc")
+for var in 'ZSFC','EHFD', 'EMFD_U','EMFD_V': #'QDIAB'
     forcings[var][:] = 0.
-costrunc = lambda x,x0,sig : np.cos((x-x0)/sig * np.pi/2) * (np.abs(x-x0) < sig)
-forcings['ZSFC'] = 40 * costrunc(forcings.lat,35,10) * costrunc(forcings.lon,90,20)
-Careful with that, might affect SP# forcings = forcings - forcings.mean('lon') # 
+for var in 'QDIAB',:
+    forcings[var] = forcings[var] - forcings[var].mean('lon')
+# costrunc = lambda x,x0,sig : np.cos((x-x0)/sig * np.pi/2) * (np.abs(x-x0) < sig)
+# forcings['ZSFC'] = 40 * costrunc(forcings.lat,35,10) * costrunc(forcings.lon,90,20)
 
 #     forcings['EMFD_U'][-2:] = 0.
 #     forcings['EMFD_V'][-2:] = 0.

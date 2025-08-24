@@ -4,7 +4,7 @@ import dedalus.public as d3
 import time
 import h5py
 import matplotlib.pyplot as plt
-from stationarywave import StationaryWaveProblem
+from model.stationarywave import StationaryWaveProblem
 
 
 def thetaphi_to_latlon(ds):

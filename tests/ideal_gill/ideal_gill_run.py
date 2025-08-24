@@ -1,6 +1,8 @@
 import numpy as np
 import xarray as xr
-from stationarywave import StationaryWaveProblem
+import sys
+sys.path.append('../../')
+from model.stationarywave import StationaryWaveProblem
 
 case_name = "ideal_Gill_nozm"
 sph_resolution = 32

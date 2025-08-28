@@ -299,18 +299,21 @@ class StationaryWaveProblem:
                 vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})/self.deltasigma_half[{i-1}] )/2"
                 vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i})/self.deltasigma_half[{i-1}] )/2"
                 expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i)})/2 + T{i}*(sigmadotbar{i})/2)"
+                dtbardlnsigma = f"((Tbar{i+1}-Tbar{i}) / self.deltasigma_half[{i-1}] * self.sigma_half[{i-1}])"
             elif i==self.Nsigma:
                 vert_advection_mom_1 = f"( sigmadotbar{i-1}*(u{i}-u{i-1})/self.deltasigma_half[{i-2}] )/2"
                 vert_advection_mom_2 = f"( {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1})/self.deltasigma_half[{i-2}] )/2"
                 vert_advection_T_1   = f"( sigmadotbar{i-1}*(T{i}-T{i-1})/self.deltasigma_half[{i-2}] )/2"
                 vert_advection_T_2   = f"( {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] )/2"
                 expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i-1})/2)"
+                dtbardlnsigma = f"((Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] * self.sigma_half[{i-1}])"
             else:
                 vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i})/self.deltasigma_half[{i-1}] + sigmadotbar{i-1}*(u{i}-u{i-1})/self.deltasigma_half[{i-2}] )/2"
                 vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i})/self.deltasigma_half[{i-1}] + {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1})/self.deltasigma_half[{i-2}] )/2"
                 vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})/self.deltasigma_half[{i-1}] + sigmadotbar{i-1}*(T{i}-T{i-1})/self.deltasigma_half[{i-2}] )/2"
                 vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i})/self.deltasigma_half[{i-1}] + {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] )/2"
                 expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i)}+{self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i}+sigmadotbar{i-1})/2)"
+                dtbardlnsigma = f"((Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] * self.sigma_half[{i-1}])"
 
             LHS_mom = f"dt(u{i}) \
                 + epsilon_mom[{i-1}] * u{i} \
@@ -320,7 +323,10 @@ class StationaryWaveProblem:
             
             LHS_T = f"dt(T{i}) \
                 + epsilon_T[{i-1}] * T{i} \
-                + nu * lap(lap(T{i}))"
+                + nu * lap(lap(T{i}))\
+                - epsilon_T[{i-1}] * lnps * {dtbardlnsigma}\
+                - nu * {dtbardlnsigma} * lap(lap(lnps))\
+                "
 
             minus_RHS_mom = f"( ubar{i}@grad(u{i})\
                 + u{i}@grad(ubar{i})\
@@ -411,6 +417,7 @@ class StationaryWaveProblem:
             alpha_itp = (self.sigma_half[i] - self.sigma_full[i]) / (self.sigma_half[i] - self.sigma_half[i-1])
             self.vars[f'sigmadotbar{i}'] = self.vars[f'sigmadotbar{i}']\
                 - self.sigma_full[i] * (alpha_itp * self.vars[f'ubar{i}'] + (1-alpha_itp) * self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar'])
+            self.vars[f'sigmadotbar{i}'] = self.vars[f'sigmadotbar{i}'].evaluate() # not sure if this is necessary
             
     def initialize_basic_state_from_pressure_data(self,input_data):
         """
@@ -650,6 +657,8 @@ class StationaryWaveProblem:
                     if use_CFL:
                         timestep = CFL.compute_timestep()
                     self.solver.step(timestep)
+                    m, ell, *_ = self.dist.coeff_layout.local_group_arrays(self.full_basis.domain(self.dist), scales=1)
+                    self.vars['lnps']['c'][m == 0] = 0.
                     if (self.solver.iteration-1) % 20 == 0:
                         max_u = np.sqrt(flow.max('u2')) / (meter/second)
                         logger.info('Iteration=%i, Time=%e, dt=%e, max|u|=%f m/s' %(self.solver.iteration, self.solver.sim_time, timestep, max_u))

@@ -7,7 +7,6 @@
 # temperature T_i, and perturbation-log-surface-pressure lnps.                           #
 #                                                                                        #
 # TODO: Nonlinear extension, add some attributes to the output,                          #
-# add nonuniform sigma levels                                                            #
 #                                                                                        #
 # A steady-state should be reached after a few days of integration, typically 20-50      #
 #                                                                                        #
@@ -70,8 +69,8 @@ class StationaryWaveProblem:
         """
         Initialize the stationary wave problem with given parameters.
 
-        Parameters:
-        ------------
+        Parameters
+        ----------
         resolution : int
             Maximum degree & order in the spherical harmonic expansion. Akin to the order of a triangular truncation.
         sigma_full : array-like
@@ -164,30 +163,35 @@ class StationaryWaveProblem:
 
     # The following functions are used in the formulation of the problem equations
     def _utilde(self):
+        """
+        Expresses the vertical average of the perturbation horizontal velocity.
+        """
         vint_us    = "+".join([f"self.deltasigma_full[{j-1}] * u{j}"  for j in range(1,self.Nsigma+1)])
         return f"({vint_us})"
     
     def _ubartilde(self):
+        """
+        Expresses the vertical average of the basic-state horizontal velocity.
+        """
         vint_ubars = "+".join([f"self.deltasigma_full[{j-1}] * ubar{j}" for j in range(1,self.Nsigma+1)])
         return f"({vint_ubars})"
     
     def _dlnps_dt(self):
         """
-        Outputs a str that expresses the log surface pressure tendency as a function of problem variables
+        Expresses the log surface pressure tendency as a function of problem variables
         (perturbation log surface pressure lnps, basic-state log surface pressure lnpsbar,
         perturbation velocities u, basic-state velocities ubar).
         """
         return f"(- (div({self._utilde()}) + {self._utilde()}@grad(lnpsbar) + {self._ubartilde()}@grad(lnps)))"
-
     
     def _sigmadot(self,i):
         """
-        Outputs a str that expresses the sigma-vertical-velocity at level i as a function of problem variables
+        Expresses the sigma-vertical-velocity at level i as a function of problem variables
         (perturbation log surface pressure lnps, basic-state log surface pressure lnpsbar,
         perturbation velocities u, basic-state velocities ubar).
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         i : int
             The index of the half sigma level (1 to Nsigma).
         """
@@ -202,11 +206,11 @@ class StationaryWaveProblem:
 
     def _Phiprime(self,i):
         """
-        Outputs a str that expresses the perturbation geopotential height at full level i as a function of 
-        perturbartion temperarture T.
+        Expresses the perturbation geopotential height at full level i as a function of 
+        perturbartion temperature T.
     
-        Parameters:
-        -----------
+        Parameters
+        ----------
         i : int
             The index of the half sigma level (1 to Nsigma).
         """
@@ -372,8 +376,8 @@ class StationaryWaveProblem:
         Initialize the basic state fields from input data that are defined on the same sigma levels as the model.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         input_data : xarray.Dataset
             Dataset containing the basic state variables (U, V, W, T, SP) on sigma levels.
             U is zonal velocity in m/s, V is meridional velocity in m/s, W is the pressure velocity in Pa/s,
@@ -425,8 +429,8 @@ class StationaryWaveProblem:
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_basic_state_from_sigma_data.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         input_data : xarray.Dataset
             Dataset containing the basic state variables (U, V, W, T, SP) on pressure levels. 
             U is zonal velocity in m/s, V is meridional velocity in m/s, W is the pressure velocity in Pa/s,
@@ -462,8 +466,8 @@ class StationaryWaveProblem:
         Initialize the forcing fields from input data that are defined on the same sigma levels as the model.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         input_data : xarray.Dataset
             Dataset containing the forcing fields (ZSFC, QDIAB, EHFD, EMFD_U, EMFD_V).
             ZSFC is the surface height in m and must have dimensions (lat, lon)
@@ -499,8 +503,8 @@ class StationaryWaveProblem:
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_forcings_from_sigma_data.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         input_data : xarray.Dataset
             Dataset containing the forcing fields (ZSFC, QDIAB, EHFD, EMFD_U, EMFD_V)
             on pressure levels, plus surface pressure SP.
@@ -531,8 +535,8 @@ class StationaryWaveProblem:
         """
         Diagnose pressure velocity.
         
-        Parameters:
-        -----------
+        Parameters
+        ----------
         i : int
             The index of the full sigma level (1 to Nsigma-1).
         """
@@ -606,13 +610,20 @@ class StationaryWaveProblem:
             
     def integrate(self, restart=False, restart_id='s1', use_CFL=False, safety_CFL=0.7, timestep=400, stop_sim_time=5*86400):
         """Integrate the problem. 
-        args:
-            - restart: bool, whether this is a restart run
-            - restart_id: str, identifier for the restart snapshot (e.g. 's1', 's2', etc.)
-            - use_CFL: bool, whether to use an adaptive timestep based on the CFL condition
-            - safety_CFL: float, fraction of max timestep allowed by the CFL condition to use 
-            - timestep: float, initial timestep in seconds
-            - stop_sim_time: float, simulation time in seconds until which to integrate
+        Parameters
+        ---------------
+        restart : bool, optional
+            Whether to restart from a previous snapshot. Default is False.
+        restart_id : str, optional
+            Identifier for the restart snapshot (e.g. 's1', 's2', etc.). Default is 's1'.
+        use_CFL : bool, optional
+            Whether to use an adaptive timestep based on the CFL condition. Default is False.
+        safety_CFL : float, optional
+            Fraction of max timestep allowed by the CFL condition to use. Default is 0.7
+        timestep : float, optional
+            Initial timestep in seconds. Default is 400s.
+        stop_sim_time : float, optional
+            Simulation time in seconds until which to integrate. Default is 5 days.
         """
         # Solver
         self.solver = self.problem.build_solver(d3.CNLF2)

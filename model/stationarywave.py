@@ -543,20 +543,21 @@ class StationaryWaveProblem:
         p0 = 1e5 * kilogram / meter / second ** 2  # Reference surface pressure in Pa
 
         # basic-state pressure velocity
-        sigma_full_i = i*self.deltasigma
         sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
         sigmadotbar_i = self.vars[f"sigmadotbar{i}"]
-        Dlnpsbar_Dt = eval(f"(ubar{i}+ubar{i+1})@d3.grad(lnpsbar)/2",self.namespace)
-        omegabar_i = p0 * np.exp(self.vars["lnpsbar"]) * ( sigma_full_i * Dlnpsbar_Dt + sigmadotbar_i)
-        
-        # total pressure velocity
+
+        alpha_itp = (self.sigma_half[i] - self.sigma_full[i]) / (self.sigma_half[i] - self.sigma_half[i-1])
+        (alpha_itp * self.vars[f'ubar{i}'] + (1-alpha_itp) * self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar'])
+
+        Dlnpsbar_Dt = eval(f"( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ d3.grad(lnpsbar)",self.namespace)
         Dlnpstot_Dt = eval(f"{self._dlnps_dt()}\
-                            + (ubar{i}+ubar{i+1})@grad(lnpsbar)/2\
-                            + (u{i}+u{i+1})@grad(lnpsbar)/2\
-                            + (ubar{i}+ubar{i+1})@grad(lnps)/2".replace('div','d3.div').replace('grad','d3.grad')
+                            + ( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ grad(lnpsbar)\
+                            + ( alpha_itp * u{i} + (1-alpha_itp) * u{i+1} ) @ grad(lnpsbar)\
+                            + ( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ grad(lnps)".replace('div','d3.div').replace('grad','d3.grad')
                           ,self.namespace)
         
-        omegatot_i = p0 * np.exp(self.vars["lnpsbar"]+self.vars["lnps"]) * ( sigma_full_i * Dlnpstot_Dt + sigmadotbar_i + sigmadot_i)
+        omegabar_i = p0 * np.exp(self.vars["lnpsbar"]) * ( self.sigma_full[i] * Dlnpsbar_Dt + sigmadotbar_i)
+        omegatot_i = p0 * np.exp(self.vars["lnpsbar"]+self.vars["lnps"]) * ( self.sigma_full[i] * Dlnpstot_Dt + sigmadotbar_i + sigmadot_i)
         
         return omegatot_i-omegabar_i
 

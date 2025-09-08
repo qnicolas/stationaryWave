@@ -296,28 +296,46 @@ class StationaryWaveProblem:
             self.problem.add_equation(f"dt(lnps) = {self._dlnps_dt()}")
 
         for i in range(1,self.Nsigma+1):
-            # Build terms that involve vertical differentiation/staggering - different treatment for upper and lower boundaries
+            # Build terms that involve vertical differentiation/staggering:
+            # Contribution from full sigma level immediately below level i
+            vert_advection_mom_1_lower = f"sigmadotbar{i} * (u{i+1}-u{i}) / self.deltasigma_half[{i-1}]"
+            vert_advection_mom_2_lower = f"{self._sigmadot(i)} * (ubar{i+1}-ubar{i}) / self.deltasigma_half[{i-1}]"
+            vert_advection_T_1_lower   = f"sigmadotbar{i} * (T{i+1}-T{i}) / self.deltasigma_half[{i-1}]"
+            vert_advection_T_2_lower   = f"{self._sigmadot(i)} * (Tbar{i+1}-Tbar{i}) / self.deltasigma_half[{i-1}]"
+            expansion_lower = f"kappa/self.sigma_half[{i-1}] * ( Tbar{i} * {self._sigmadot(i)} + T{i} * sigmadotbar{i} )"
+
+            # Contribution from full sigma level immediately above level i
+            vert_advection_mom_1_upper = f"sigmadotbar{i-1} * (u{i}-u{i-1}) / self.deltasigma_half[{i-2}]"
+            vert_advection_mom_2_upper = f"{self._sigmadot(i-1)} * (ubar{i}-ubar{i-1}) / self.deltasigma_half[{i-2}]"
+            vert_advection_T_1_upper   = f"sigmadotbar{i-1} * (T{i}-T{i-1}) / self.deltasigma_half[{i-2}]"
+            vert_advection_T_2_upper   = f"{self._sigmadot(i-1)} * (Tbar{i}-Tbar{i-1}) / self.deltasigma_half[{i-2}]"
+            expansion_upper = f"kappa/self.sigma_half[{i-1}] * ( Tbar{i} * {self._sigmadot(i-1)} + T{i} * sigmadotbar{i-1} )"
+
+            # Combine contributions from above and below, taking care of first and last levels
             if i==1:
-                vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i})/self.deltasigma_half[{i-1}] )/2"
-                vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i})/self.deltasigma_half[{i-1}] )/2"
-                vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})/self.deltasigma_half[{i-1}] )/2"
-                vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i})/self.deltasigma_half[{i-1}] )/2"
-                expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i)})/2 + T{i}*(sigmadotbar{i})/2)"
-                dtbardlnsigma = f"((Tbar{i+1}-Tbar{i}) / self.deltasigma_half[{i-1}] * self.sigma_half[{i-1}])"
+                vert_advection_mom_1 = f" {vert_advection_mom_1_lower} / 2"
+                vert_advection_mom_2 = f" {vert_advection_mom_2_lower} / 2"
+                vert_advection_T_1   = f" {vert_advection_T_1_lower} / 2"
+                vert_advection_T_2   = f" {vert_advection_T_2_lower} / 2"
+                expansion = f" {expansion_lower} / 2"
             elif i==self.Nsigma:
-                vert_advection_mom_1 = f"( sigmadotbar{i-1}*(u{i}-u{i-1})/self.deltasigma_half[{i-2}] )/2"
-                vert_advection_mom_2 = f"( {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1})/self.deltasigma_half[{i-2}] )/2"
-                vert_advection_T_1   = f"( sigmadotbar{i-1}*(T{i}-T{i-1})/self.deltasigma_half[{i-2}] )/2"
-                vert_advection_T_2   = f"( {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] )/2"
-                expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i-1})/2)"
-                dtbardlnsigma = f"((Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] * self.sigma_half[{i-1}])"
+                vert_advection_mom_1 = f" {vert_advection_mom_1_upper} / 2"
+                vert_advection_mom_2 = f" {vert_advection_mom_2_upper} / 2"
+                vert_advection_T_1   = f" {vert_advection_T_1_upper} / 2"
+                vert_advection_T_2   = f" {vert_advection_T_2_upper} / 2"
+                expansion = f" {expansion_upper} / 2"
             else:
-                vert_advection_mom_1 = f"( sigmadotbar{i}*(u{i+1}-u{i})/self.deltasigma_half[{i-1}] + sigmadotbar{i-1}*(u{i}-u{i-1})/self.deltasigma_half[{i-2}] )/2"
-                vert_advection_mom_2 = f"( {self._sigmadot(i)}*(ubar{i+1}-ubar{i})/self.deltasigma_half[{i-1}] + {self._sigmadot(i-1)}*(ubar{i}-ubar{i-1})/self.deltasigma_half[{i-2}] )/2"
-                vert_advection_T_1   = f"( sigmadotbar{i}*(T{i+1}-T{i})/self.deltasigma_half[{i-1}] + sigmadotbar{i-1}*(T{i}-T{i-1})/self.deltasigma_half[{i-2}] )/2"
-                vert_advection_T_2   = f"( {self._sigmadot(i)}*(Tbar{i+1}-Tbar{i})/self.deltasigma_half[{i-1}] + {self._sigmadot(i-1)}*(Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] )/2"
-                expansion = f"kappa/self.sigma_half[{i-1}]*(Tbar{i}*({self._sigmadot(i)}+{self._sigmadot(i-1)})/2 + T{i}*(sigmadotbar{i}+sigmadotbar{i-1})/2)"
-                dtbardlnsigma = f"((Tbar{i}-Tbar{i-1})/self.deltasigma_half[{i-2}] * self.sigma_half[{i-1}])"
+                vert_advection_mom_1 = f"( {vert_advection_mom_1_lower} + {vert_advection_mom_1_upper} ) / 2"
+                vert_advection_mom_2 = f"( {vert_advection_mom_2_lower} + {vert_advection_mom_2_upper} ) / 2"
+                vert_advection_T_1   = f"( {vert_advection_T_1_lower} + {vert_advection_T_1_upper} ) / 2"
+                vert_advection_T_2   = f"( {vert_advection_T_2_lower} + {vert_advection_T_2_upper} ) / 2"
+                expansion = f"( {expansion_lower} + {expansion_upper} ) / 2"
+
+            # Calculate dtbardlnsigma, which is needed in the temperature equation, using first-order finite differences
+            if i==1:
+                dtbardlnsigma = f"((Tbar{i+1}-Tbar{i}) / self.deltasigma_half[{i-1}] * self.sigma_half[{i-1}])" # Forward difference
+            else:
+                dtbardlnsigma = f"((Tbar{i}-Tbar{i-1}) / self.deltasigma_half[{i-2}] * self.sigma_half[{i-1}])" # Backward difference
 
             LHS_mom = f"dt(u{i}) \
                 + epsilon_mom[{i-1}] * u{i} \

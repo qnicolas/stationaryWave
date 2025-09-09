@@ -32,7 +32,8 @@ import dedalus.public as d3
 import logging
 logger = logging.getLogger(__name__)
 import warnings
-from mpi4py import MPI
+import time
+import datetime
 
 import xarray as xr
 
@@ -129,6 +130,7 @@ class StationaryWaveProblem:
         self._setup_problem()
         
         # For debugging purposes, this is how to access the rank and size of the MPI communicator
+        # (First, need to "from mpi4py import MPI" at the top of the file)
         # world_rank = MPI.COMM_WORLD.Get_rank()
         # world_size = MPI.COMM_WORLD.Get_size()
         # print(f"Running on rank {world_rank} of {world_size}"
@@ -145,7 +147,7 @@ class StationaryWaveProblem:
         if self.linear:
             dealias = (1, 1)
         else:
-            dealias = (3/2, 3/2) # Delaiasing factor appropriate for order 2 nonlinearities 
+            dealias = (2, 2) # Dealiasing factor appropriate for order 3 nonlinearities 
 
         # Spherical coordinates / bases
         self.coords = d3.S2Coordinates('phi', 'theta')
@@ -182,7 +184,11 @@ class StationaryWaveProblem:
         (perturbation log surface pressure lnps, basic-state log surface pressure lnpsbar,
         perturbation velocities u, basic-state velocities ubar).
         """
-        return f"(- (div({self._utilde()}) + {self._utilde()}@grad(lnpsbar) + {self._ubartilde()}@grad(lnps)))"
+        dlnpsdt_linear = f"- div({self._utilde()}) - {self._utilde()}@grad(lnpsbar) - {self._ubartilde()}@grad(lnps)"
+        if self.linear:
+            return f"( {dlnpsdt_linear} )"
+        else:
+            return f"( {dlnpsdt_linear} - {self._utilde()}@grad(lnps) )"
     
     def _sigmadot(self,i):
         """
@@ -202,7 +208,11 @@ class StationaryWaveProblem:
         int_u_minus_utilde_bar = f"({partial_vint_ubars} - self.sigma_full[{i}] * {self._ubartilde()})"
         int_d_minus_dtilde     = f"div({int_u_minus_utilde})"
 
-        return f"(- ({int_u_minus_utilde})@grad(lnpsbar) - ({int_u_minus_utilde_bar})@grad(lnps) - {int_d_minus_dtilde})"
+        sigmadot_linear = f"- ({int_u_minus_utilde})@grad(lnpsbar) - ({int_u_minus_utilde_bar})@grad(lnps) - {int_d_minus_dtilde}"
+        if self.linear:
+            return f"( {sigmadot_linear} )"
+        else:
+            return f"( {sigmadot_linear} - ({int_u_minus_utilde})@grad(lnps) )"
 
     def _Phiprime(self,i):
         """
@@ -280,7 +290,7 @@ class StationaryWaveProblem:
         one['g'] = 1.0  
 
         # Gather all 3D variables 
-        self.vars  = {**us, **Ts, **Qdiabs, **EMFDs, **EHFDs, **ubars, **Tbars, **sigmadotbars, 'lnps': lnps, 'lnpsbar': lnpsbar, 'Phisfc': Phisfc}
+        self.vars  = {**us, **Ts, **Qdiabs, **EMFDs, **EHFDs, **ubars, **Tbars, **sigmadotbars, 'lnps': lnps, 'lnpsbar': lnpsbar, 'Phisfc': Phisfc, 'one': one}
 
         ###################################################
         ################ PROBLEM EQUATIONS ################
@@ -290,48 +300,52 @@ class StationaryWaveProblem:
         self.problem = d3.IVP(list(us.values()) + list(Ts.values()) + [lnps,] , namespace=self.namespace)
 
         # log pressure equation
-        if self.zonal_basic_state: #All terms with non-constant coefficients from the basic state go on the LHS
+        if self.zonal_basic_state and self.linear: #All terms with non-constant coefficients from the basic state go on the LHS
             self.problem.add_equation(f"dt(lnps) - {self._dlnps_dt()} = 0")
         else:
             self.problem.add_equation(f"dt(lnps) = {self._dlnps_dt()}")
 
         for i in range(1,self.Nsigma+1):
-            # Build terms that involve vertical differentiation/staggering:
+            # Build terms that involve sigma-dot, because they require different treatment at upper and lower boundaries
             # Contribution from full sigma level immediately below level i
-            vert_advection_mom_1_lower = f"sigmadotbar{i} * (u{i+1}-u{i}) / self.deltasigma_half[{i-1}]"
-            vert_advection_mom_2_lower = f"{self._sigmadot(i)} * (ubar{i+1}-ubar{i}) / self.deltasigma_half[{i-1}]"
-            vert_advection_T_1_lower   = f"sigmadotbar{i} * (T{i+1}-T{i}) / self.deltasigma_half[{i-1}]"
-            vert_advection_T_2_lower   = f"{self._sigmadot(i)} * (Tbar{i+1}-Tbar{i}) / self.deltasigma_half[{i-1}]"
-            expansion_lower = f"kappa/self.sigma_half[{i-1}] * ( Tbar{i} * {self._sigmadot(i)} + T{i} * sigmadotbar{i} )"
+            nonlin = "" if self.linear else f" + {self._sigmadot(i)} * (u{i+1}-u{i})"
+            vert_advection_mom_lower = f"( sigmadotbar{i} * (u{i+1}-u{i}) + {self._sigmadot(i)} * (ubar{i+1}-ubar{i}) {nonlin} ) \
+                                           / self.deltasigma_half[{i-1}]"
+            
+            nonlin = "" if self.linear else f" + {self._sigmadot(i)} * (T{i+1}-T{i})"
+            vert_advection_T_lower   = f"( sigmadotbar{i} * (T{i+1}-T{i}) + {self._sigmadot(i)} * (Tbar{i+1}-Tbar{i}) {nonlin} ) \
+                                           / self.deltasigma_half[{i-1}]"
+            
+            nonlin = "" if self.linear else f" + T{i} * {self._sigmadot(i)}"
+            expansion_lower = f"kappa/self.sigma_half[{i-1}] * ( Tbar{i} * {self._sigmadot(i)} + T{i} * sigmadotbar{i} {nonlin})"
 
             # Contribution from full sigma level immediately above level i
-            vert_advection_mom_1_upper = f"sigmadotbar{i-1} * (u{i}-u{i-1}) / self.deltasigma_half[{i-2}]"
-            vert_advection_mom_2_upper = f"{self._sigmadot(i-1)} * (ubar{i}-ubar{i-1}) / self.deltasigma_half[{i-2}]"
-            vert_advection_T_1_upper   = f"sigmadotbar{i-1} * (T{i}-T{i-1}) / self.deltasigma_half[{i-2}]"
-            vert_advection_T_2_upper   = f"{self._sigmadot(i-1)} * (Tbar{i}-Tbar{i-1}) / self.deltasigma_half[{i-2}]"
-            expansion_upper = f"kappa/self.sigma_half[{i-1}] * ( Tbar{i} * {self._sigmadot(i-1)} + T{i} * sigmadotbar{i-1} )"
+            nonlin = "" if self.linear else f" + {self._sigmadot(i-1)} * (u{i}-u{i-1})"
+            vert_advection_mom_upper = f"( sigmadotbar{i-1} * (u{i}-u{i-1}) + {self._sigmadot(i-1)} * (ubar{i}-ubar{i-1}) {nonlin} ) \
+                                           / self.deltasigma_half[{i-2}]"
+            
+            nonlin = "" if self.linear else f" + {self._sigmadot(i-1)} * (T{i}-T{i-1})"
+            vert_advection_T_upper   = f"( sigmadotbar{i-1} * (T{i}-T{i-1}) + {self._sigmadot(i-1)} * (Tbar{i}-Tbar{i-1}) {nonlin} ) \
+                                           / self.deltasigma_half[{i-2}]"
+            
+            nonlin = "" if self.linear else f" + T{i} * {self._sigmadot(i-1)}"
+            expansion_upper = f"kappa/self.sigma_half[{i-1}] * ( Tbar{i} * {self._sigmadot(i-1)} + T{i} * sigmadotbar{i-1} {nonlin})"
 
             # Combine contributions from above and below, taking care of first and last levels
             if i==1:
-                vert_advection_mom_1 = f" {vert_advection_mom_1_lower} / 2"
-                vert_advection_mom_2 = f" {vert_advection_mom_2_lower} / 2"
-                vert_advection_T_1   = f" {vert_advection_T_1_lower} / 2"
-                vert_advection_T_2   = f" {vert_advection_T_2_lower} / 2"
+                vert_advection_mom = f" {vert_advection_mom_lower} / 2"
+                vert_advection_T   = f" {vert_advection_T_lower} / 2"
                 expansion = f" {expansion_lower} / 2"
             elif i==self.Nsigma:
-                vert_advection_mom_1 = f" {vert_advection_mom_1_upper} / 2"
-                vert_advection_mom_2 = f" {vert_advection_mom_2_upper} / 2"
-                vert_advection_T_1   = f" {vert_advection_T_1_upper} / 2"
-                vert_advection_T_2   = f" {vert_advection_T_2_upper} / 2"
+                vert_advection_mom = f" {vert_advection_mom_upper} / 2"
+                vert_advection_T   = f" {vert_advection_T_upper} / 2"
                 expansion = f" {expansion_upper} / 2"
             else:
-                vert_advection_mom_1 = f"( {vert_advection_mom_1_lower} + {vert_advection_mom_1_upper} ) / 2"
-                vert_advection_mom_2 = f"( {vert_advection_mom_2_lower} + {vert_advection_mom_2_upper} ) / 2"
-                vert_advection_T_1   = f"( {vert_advection_T_1_lower} + {vert_advection_T_1_upper} ) / 2"
-                vert_advection_T_2   = f"( {vert_advection_T_2_lower} + {vert_advection_T_2_upper} ) / 2"
+                vert_advection_mom = f"( {vert_advection_mom_lower} + {vert_advection_mom_upper} ) / 2"
+                vert_advection_T   = f"( {vert_advection_T_lower} + {vert_advection_T_upper} ) / 2"
                 expansion = f"( {expansion_lower} + {expansion_upper} ) / 2"
 
-            # Calculate dtbardlnsigma, which is needed in the temperature equation, using first-order finite differences
+            # Calculate d(Tbar)/d(ln(sigma)), which is needed in the temperature equation, using first-order finite differences
             if i==1:
                 dtbardlnsigma = f"((Tbar{i+1}-Tbar{i}) / self.deltasigma_half[{i-1}] * self.sigma_half[{i-1}])" # Forward difference
             else:
@@ -347,52 +361,58 @@ class StationaryWaveProblem:
                 + epsilon_T[{i-1}] * T{i} \
                 + nu * lap(lap(T{i}))\
                 - epsilon_T[{i-1}] * lnps * {dtbardlnsigma}\
-                - nu * {dtbardlnsigma} * lap(lap(lnps))\
-                "
+                - nu * {dtbardlnsigma} * lap(lap(lnps)) "
 
-            minus_RHS_mom = f"( ubar{i}@grad(u{i})\
+            # This is a bit of a misnomer - there are nonlinear terms in vert_advection_mom 
+            linear_terms_mom = f"( ubar{i}@grad(u{i})\
                 + u{i}@grad(ubar{i})\
-                + {vert_advection_mom_1}\
-                + {vert_advection_mom_2} \
+                + {vert_advection_mom}\
                 + Rd * Tbar{i} * grad(lnps)\
                 + Rd * T{i} * grad(lnpsbar))"
+
+            nonlinear_terms_mom = "" if self.linear\
+                else f" - ( u{i}@grad(u{i}) + Rd * T{i} * grad(lnps) )"
             
-            minus_RHS_T = f"( ubar{i}@grad(T{i}) + u{i}@grad(Tbar{i})\
-                + {vert_advection_T_1}\
-                + {vert_advection_T_2}\
+            linear_terms_T = f"( ubar{i}@grad(T{i}) + u{i}@grad(Tbar{i})\
+                + {vert_advection_T}\
                 - {expansion}\
                 - kappa * T{i} * (ubar{i} - {self._ubartilde()})@grad(lnpsbar)\
                 - kappa * Tbar{i} * (u{i} - {self._utilde()})@grad(lnpsbar)\
                 - kappa * Tbar{i} * (ubar{i} - {self._ubartilde()})@grad(lnps)\
                 + kappa * Tbar{i} * div({self._utilde()})\
                 + kappa * T{i} * div({self._ubartilde()}) )"
-                # - kappa * Tbar{i} * {self._dlnps_dt()}\
-                # - kappa * T{i} * ubar{i}@grad(lnpsbar)\
-                # - kappa * Tbar{i} * u{i}@grad(lnpsbar)\
-                # - kappa * Tbar{i} * ubar{i}@grad(lnps) )"
             
-            forcing_mom = f"-grad(Phisfc) - EMFD{i}"
+            nonlinear_terms_T =  "" if self.linear\
+                else f" - ( u{i}@grad(T{i})\
+                - kappa * T{i} * (u{i} - {self._utilde()})@grad(lnpsbar)\
+                - kappa * T{i} * (ubar{i} - {self._ubartilde()})@grad(lnps)\
+                - kappa * Tbar{i} * (u{i} - {self._utilde()})@grad(lnps)\
+                - kappa * T{i} * (u{i} - {self._utilde()})@grad(lnps)\
+                + kappa * T{i} * div({self._utilde()}) )"
+            
+            forcing_mom = f"- grad(Phisfc) - EMFD{i}"
 
-            forcing_T = f"Qdiab{i} - EHFD{i}"
+            forcing_T = f"+ Qdiab{i} - EHFD{i}"
 
             zonal_mean_relaxation_u = f"- epsilon_zonalmean * Average(u{i},'phi') * one"
             zonal_mean_relaxation_T = f"- epsilon_zonalmean * Average(T{i},'phi') * one"
 
-            if self.zonal_basic_state: #All terms with non-constant coefficients from the basic state go on the LHS
+            if self.zonal_basic_state and self.linear: #All terms with non-constant coefficients from the basic state go the LHS
                 # Momentum equation
-                self.problem.add_equation(f"{LHS_mom} + {minus_RHS_mom} = {zonal_mean_relaxation_u} + {forcing_mom}")
+                self.problem.add_equation(f"{LHS_mom} + {linear_terms_mom} = {zonal_mean_relaxation_u} {forcing_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(f"{LHS_T} + {minus_RHS_T} = {zonal_mean_relaxation_T} + {forcing_T}")
+                self.problem.add_equation(f"{LHS_T} + {linear_terms_T} = {zonal_mean_relaxation_T} {forcing_T}")
             else:
                 # Momentum equation
-                self.problem.add_equation(f"{LHS_mom} = {zonal_mean_relaxation_u} + {forcing_mom} - {minus_RHS_mom}")
+                self.problem.add_equation(f"{LHS_mom} = {zonal_mean_relaxation_u} {forcing_mom} {nonlinear_terms_mom} - {linear_terms_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(f"{LHS_T} = {zonal_mean_relaxation_T} + {forcing_T} - {minus_RHS_T}")
+                self.problem.add_equation(f"{LHS_T} = {zonal_mean_relaxation_T} {forcing_T} {nonlinear_terms_T} - {linear_terms_T}")
 
     def initialize_basic_state_from_sigma_data(self,input_data):
         """
         Initialize the basic state fields from input data that are defined on the same sigma levels as the model.
-        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
+        both lat and lon must be increasing, and lon must span -180 to 180.
 
         Parameters
         ----------
@@ -446,6 +466,8 @@ class StationaryWaveProblem:
         Initialize the basic state fields from input data that are defined on arbitrary pressure levels.
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_basic_state_from_sigma_data.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
+        both lat and lon must be increasing, and lon must span -180 to 180.
 
         Parameters
         ----------
@@ -482,7 +504,8 @@ class StationaryWaveProblem:
     def initialize_forcings_from_sigma_data(self,input_data):
         """
         Initialize the forcing fields from input data that are defined on the same sigma levels as the model.
-        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
+        both lat and lon must be increasing, and lon must span -180 to 180.
 
         Parameters
         ----------
@@ -520,6 +543,8 @@ class StationaryWaveProblem:
         Initialize the forcing fields from input data that are defined on arbitrary pressure levels.
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_forcings_from_sigma_data.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
+        both lat and lon must be increasing, and lon must span -180 to 180.
 
         Parameters
         ----------
@@ -565,17 +590,20 @@ class StationaryWaveProblem:
         sigmadotbar_i = self.vars[f"sigmadotbar{i}"]
 
         alpha_itp = (self.sigma_half[i] - self.sigma_full[i]) / (self.sigma_half[i] - self.sigma_half[i-1])
-        (alpha_itp * self.vars[f'ubar{i}'] + (1-alpha_itp) * self.vars[f'ubar{i+1}']) @ d3.grad(self.vars['lnpsbar'])
 
-        Dlnpsbar_Dt = eval(f"( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ d3.grad(lnpsbar)",self.namespace)
+        Dlnpsbar_Dt = eval(f"( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ d3.grad(lnpsbar)",(self.namespace|{'alpha_itp':alpha_itp}))
+
+        nonlin = "" if self.linear else f"+ ( alpha_itp * u{i} + (1-alpha_itp) * u{i+1} ) @ grad(lnps)"
+        # All the multiplications by self.vars['one'] are used to bring variables from the zonal basis to the full basis 
         Dlnpstot_Dt = eval(f"{self._dlnps_dt()}\
-                            + ( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ grad(lnpsbar)\
+                            +(( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ grad(lnpsbar)) * self.vars['one']\
                             + ( alpha_itp * u{i} + (1-alpha_itp) * u{i+1} ) @ grad(lnpsbar)\
-                            + ( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ grad(lnps)".replace('div','d3.div').replace('grad','d3.grad')
-                          ,self.namespace)
+                            + ( alpha_itp * ubar{i} + (1-alpha_itp) * ubar{i+1} ) @ grad(lnps)\
+                            {nonlin}".replace('div','d3.div').replace('grad','d3.grad')
+                          ,(self.namespace|{'alpha_itp':alpha_itp}))
         
-        omegabar_i = p0 * np.exp(self.vars["lnpsbar"]) * ( self.sigma_full[i] * Dlnpsbar_Dt + sigmadotbar_i)
-        omegatot_i = p0 * np.exp(self.vars["lnpsbar"]+self.vars["lnps"]) * ( self.sigma_full[i] * Dlnpstot_Dt + sigmadotbar_i + sigmadot_i)
+        omegabar_i = p0 * np.exp(self.vars["lnpsbar"]) * ( self.sigma_full[i] * Dlnpsbar_Dt + sigmadotbar_i) * self.vars['one']
+        omegatot_i = p0 * np.exp(self.vars["lnpsbar"] * self.vars['one'] + self.vars["lnps"]) * ( self.sigma_full[i] * Dlnpstot_Dt + sigmadotbar_i * self.vars['one'] + sigmadot_i)
         
         return omegatot_i-omegabar_i
 
@@ -623,9 +651,7 @@ class StationaryWaveProblem:
             # Thus I simpy replace them with d3.div and d3.grad
             sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
             self.snapshots.add_task(sigmadot_i / (1/second), name=f'sigmadot{i}') 
-            
-            if not self.zonal_basic_state: #otherwise a bug in Dedalus prevents us from outputting omega for now
-                self.snapshots.add_task(self._calc_omega(i) / (kilogram / meter / second**3), name=f'omega{i}')
+            self.snapshots.add_task(self._calc_omega(i) / (kilogram / meter / second**3), name=f'omega{i}')
             
     def integrate(self, restart=False, restart_id='s1', use_CFL=False, safety_CFL=0.7, timestep=400, stop_sim_time=5*86400):
         """Integrate the problem. 
@@ -645,7 +671,7 @@ class StationaryWaveProblem:
             Simulation time in seconds until which to integrate. Default is 5 days.
         """
         # Solver
-        self.solver = self.problem.build_solver(d3.CNLF2)
+        self.solver = self.problem.build_solver(d3.RK222)
         self.solver.stop_sim_time = stop_sim_time * second
         timestep = timestep * second
 
@@ -667,18 +693,17 @@ class StationaryWaveProblem:
         # Need to add all velocities and sigmadots - not sure if worth it
         for i in range(1,self.Nsigma+1):
             CFL.add_velocity(self.vars[f'u{i}'])
-            if not self.zonal_basic_state:
-                CFL.add_velocity(self.vars[f'ubar{i}'])
+            CFL.add_velocity(self.vars['one']*self.vars[f'ubar{i}'])
         for i in range(1,self.Nsigma):
-            # sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
-            # CFL.add_frequency(sigmadot_i/self.deltasigma/2)
-            if not self.zonal_basic_state:
-                CFL.add_frequency(self.vars[f'sigmadotbar{i}']/self.deltasigma/2)
+            sigmadot_i = eval(self._sigmadot(i).replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
+            CFL.add_frequency(sigmadot_i/self.deltasigma_half[i-1])
+            CFL.add_frequency(self.vars['one']*self.vars[f'sigmadotbar{i}']/self.deltasigma_half[i-1])
 
         flow = d3.GlobalFlowProperty(self.solver, cadence=10)
         flow.add_property(self.vars[f'u{1}']@self.vars[f'u{1}'], name='u2')
 
         # Main loop
+        t0 = time.time()
         with warnings.catch_warnings():
             warnings.filterwarnings('error',category=RuntimeWarning)
             try:
@@ -687,12 +712,24 @@ class StationaryWaveProblem:
                     if use_CFL:
                         timestep = CFL.compute_timestep()
                     self.solver.step(timestep)
+                    # Enforce zero zonal mean of lnps
                     m, ell, *_ = self.dist.coeff_layout.local_group_arrays(self.full_basis.domain(self.dist), scales=1)
                     self.vars['lnps']['c'][m == 0] = 0.
-                    if (self.solver.iteration-1) % 20 == 0:
-                        max_u = np.sqrt(flow.max('u2')) / (meter/second)
-                        logger.info('Iteration=%i, Time=%e, dt=%e, max|u|=%f m/s' %(self.solver.iteration, self.solver.sim_time, timestep, max_u))
-                        logger.info('Iteration=%i, Time=%e, dt=%e' %(self.solver.iteration, self.solver.sim_time, timestep))
+
+                    # Print some statistics
+                    if self.solver.iteration % 20 == 0:
+                        max_u = np.sqrt(flow.max('u2')) / (meter/second) # Get max wind speed in m/s
+                        speed = 20 / (time.time()-t0) # speed in iterations per second
+                        speed_avg = speed if self.solver.iteration < 60 else 0.9 * speed_avg + 0.1 * speed # moving average of speed
+                        timestep_avg = timestep if self.solver.iteration <= 20 else 0.9 * timestep_avg + 0.1 * timestep # moving average of timestep
+                        ETA = (self.solver.stop_sim_time - self.solver.sim_time) / timestep_avg / speed_avg
+                        logger.info( f"Iteration={self.solver.iteration:d}, "\
+                                    +f"Time={self.solver.sim_time / hour:.1f} h, "\
+                                    +f"dt={timestep/second:.0f} s, "\
+                                    +f"speed={speed:.2e} it/s, "\
+                                    +f"ETA={'unknown' if self.solver.iteration < 60 else str(datetime.timedelta(seconds=int(ETA)))}, "\
+                                    +f"max|u|={max_u:.2e} m/s")
+                        t0 = time.time()
             except:
                 logger.info('Last dt=%e' %(timestep))
                 logger.error('Exception raised, triggering end of main loop.')

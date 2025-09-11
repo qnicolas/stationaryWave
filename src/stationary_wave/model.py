@@ -396,9 +396,7 @@ class StationaryWaveProblem:
             
             LHS_T = f"dt(T{i}) \
                 + self.newtonian_cooling_coefficients[{i-1}] * T{i} \
-                + self.hyperdiffusion_coefficient * lap(lap(T{i}))\
-                - self.newtonian_cooling_coefficients[{i-1}] * lnps * {dtbardlnsigma}\
-                - self.hyperdiffusion_coefficient * {dtbardlnsigma} * lap(lap(lnps)) "
+                + self.hyperdiffusion_coefficient * lap(lap(T{i}))"
 
             linear_terms_mom = f"( ubar{i}@grad(u{i})\
                 + u{i}@grad(ubar{i})\
@@ -417,7 +415,9 @@ class StationaryWaveProblem:
                 - kappa * Tbar{i} * (u{i} - {self._utilde()})@grad(lnpsbar)\
                 - kappa * Tbar{i} * (ubar{i} - {self._ubartilde()})@grad(lnps)\
                 + kappa * Tbar{i} * div({self._utilde()})\
-                + kappa * T{i} * div({self._ubartilde()}) )"
+                + kappa * T{i} * div({self._ubartilde()})\
+                - self.newtonian_cooling_coefficients[{i-1}] * lnps * {dtbardlnsigma}\
+                - self.hyperdiffusion_coefficient * {dtbardlnsigma} * lap(lap(lnps))  )"
             
             nonlinear_terms_T =  "" if self.linear\
                 else f" - ( u{i}@grad(T{i})\
@@ -721,14 +721,21 @@ class StationaryWaveProblem:
         self.solver.stop_sim_time = stop_sim_time * second
         timestep = timestep * second
 
+        snapshot_id = f'stationarywave_{self.Nsigma}level_T{self.resolution}_{self.case_name}'
+
         if not restart:
             file_handler_mode = 'overwrite'
         else:
             write, initial_timestep = self.solver.load_state(self.output_dir+'%s/%s_%s.h5'%(snapshot_id,snapshot_id,restart_id))
+            for i in range(1,self.Nsigma+1):
+                # nondimensionalize u, T perturbations
+                self.vars[f'u{i}'] = self.vars[f'u{i}'] * (meter / second)
+                self.vars[f'T{i}'] = self.vars[f'T{i}'] * Kelvin
             timestep = min(timestep, initial_timestep)
             file_handler_mode = 'append'
+            speed_avg = 0.
+            timestep_avg = timestep
 
-        snapshot_id = f'stationarywave_{self.Nsigma}level_T{self.resolution}_{self.case_name}'
 
         # Save snapshots every 6h of model time
         self.snapshots = self.solver.evaluator.add_file_handler(self.output_dir+snapshot_id, sim_dt=6 * 3600 * second, mode=file_handler_mode)  

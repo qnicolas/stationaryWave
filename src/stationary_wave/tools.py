@@ -136,7 +136,7 @@ def process_sigma_sim(name,sims,data_path = DATA_PATH,avg = np.array([20,30])):
     output : xarray.DataArray
         Dataset with aimulation output + time-averaged variables
     """
-    sim = open_h5s(name,('s1',))
+    sim = open_h5s(name,sims)
     # Read in sigma levels
     sigma_full = np.loadtxt(data_path+f"{name}/sigma_full.txt")
     sim.attrs['sigma_full'] = sigma_full

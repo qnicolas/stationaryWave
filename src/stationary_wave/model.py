@@ -267,7 +267,7 @@ class StationaryWaveProblem:
     def _Phiprime(self,i):
         """
         Expresses the perturbation geopotential height at full level i as a function of 
-        perturbartion temperature T.
+        perturbation temperature T.
     
         Parameters
         ----------
@@ -729,8 +729,8 @@ class StationaryWaveProblem:
             write, initial_timestep = self.solver.load_state(self.output_dir+'%s/%s_%s.h5'%(snapshot_id,snapshot_id,restart_id))
             for i in range(1,self.Nsigma+1):
                 # nondimensionalize u, T perturbations
-                self.vars[f'u{i}'] = self.vars[f'u{i}'] * (meter / second)
-                self.vars[f'T{i}'] = self.vars[f'T{i}'] * Kelvin
+                self.vars[f'u{i}']['g'] = self.vars[f'u{i}']['g'] * (meter / second)
+                self.vars[f'T{i}']['g'] = self.vars[f'T{i}']['g'] * Kelvin
             timestep = min(timestep, initial_timestep)
             file_handler_mode = 'append'
             speed_avg = 0.

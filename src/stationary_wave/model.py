@@ -507,6 +507,7 @@ class StationaryWaveProblem:
         before calling initialize_basic_state_from_sigma_data.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
         both lat and lon must be increasing, and lon must span -180 to 180.
+        pressure must be in hPa (to match most reanalysis datasets).
 
         Parameters
         ----------
@@ -516,8 +517,10 @@ class StationaryWaveProblem:
             T is temperature in K, SP is surface pressure in Pa.
             SP must have dimensions (lat, lon) or (lat,) for a zonal basic state.
             U,V,W,T must have dimensions (pressure, lat, lon) or (pressure, lat) for a zonal basic state.
-            pressure is supposed to be in hPa to match most reanalysis datasets.
         """
+        # Make sure pressure levels are increasing
+        if input_data.pressure[0] > input_data.pressure[1]:
+            input_data = input_data.reindex({'pressure':list(reversed(input_data['pressure']))})
 
         input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
         input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_half,sig,y),
@@ -587,13 +590,13 @@ class StationaryWaveProblem:
         before calling initialize_forcings_from_sigma_data.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
         both lat and lon must be increasing, and lon must span -180 to 180.
+        pressure must be in hPa (to match most reanalysis datasets).
 
         Parameters
         ----------
         input_data : xarray.Dataset
             Dataset containing the forcing fields (ZSFC, QDIAB, EHFD, EMFD_U, EMFD_V)
             on pressure levels, plus surface pressure SP.
-            pressure is supposed to be in hPa to match most reanalysis datasets.
             SP is the surface pressure in Pa and must have dimensions (lat, lon)
             ZSFC is the surface height in m and must have dimensions (lat, lon)
             QDIAB is the diabatic heating rate in K/day and must have dimensions (pressure, lat, lon).
@@ -601,6 +604,9 @@ class StationaryWaveProblem:
             EMFD_U is the eddy divergence of zonal momentum flux in m/s^2 and must have dimensions (pressure, lat, lon).
             EMFD_V is the eddy divergence of meridional momentum flux in m/s^2 and must have dimensions (pressure, lat, lon).
         """
+        # Make sure pressure levels are increasing
+        if input_data.pressure[0] > input_data.pressure[1]:
+            input_data = input_data.reindex({'pressure':list(reversed(input_data['pressure']))})
 
         input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
         input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_half,sig,y),

@@ -447,11 +447,35 @@ class StationaryWaveProblem:
                 # Thermodynamic equation
                 self.problem.add_equation(f"{LHS_T} = {zonal_mean_relaxation_T} {forcing_T} {nonlinear_terms_T} - {linear_terms_T}")
 
+    def _preprocess_input_pressure_data(self,input_data):
+        """Make sure pressure levels are increasing and reach high and low enough"""
+        if input_data.pressure[0] > input_data.pressure[1]:
+            input_data = input_data.reindex({'pressure':list(reversed(input_data['pressure']))})
+
+        input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
+        assert input_data.sigma.isel(pressure=0).max() <= self.sigma_half[0],\
+            "With this vertical grid your input data should contain pressure levels <= %.2f hPa" % (input_data.SP.min().data/100 * self.sigma_half[0])
+        assert input_data.sigma.isel(pressure=-1).min() >= self.sigma_half[-1],\
+            "With this vertical grid your input data should contain pressure levels >= %.2f hPa" % (input_data.SP.max().data/100 * self.sigma_half[-1])
+        return input_data
+        
+    def _preprocess_input_sigma_data(self,input_data):
+        """Make sure data have the correct lat/lon ranges and ordering"""
+        for coord in ['lat','lon']:
+            if coord in input_data.coords:
+                if input_data[coord][0] > input_data[coord][1]:
+                    input_data = input_data.reindex({coord:list(reversed(input_data[coord]))})
+        assert np.isclose(input_data.lat[0], -90.) and np.isclose(input_data.lat[-1], 90.), "Input data latitude must range from -90 to +90 inclusive."
+        if 'lon' in input_data.coords:
+            assert (input_data.lon[0] <= -180.) and (input_data.lon[-1]>= 180.), "Input data longitude must range from -180 to +180 inclusive."
+        return input_data
+
     def initialize_basic_state_from_sigma_data(self,input_data):
         """
         Initialize the basic state fields from input data that are defined on the same sigma levels as the model.
-        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
-        both lat and lon must be increasing, and lon must span -180 to 180.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+        lat must range from –90 to +90 inclusive.
+        lon must be included for non-zonal basic states and must range from –180 to +180 inclusive.
 
         Parameters
         ----------
@@ -463,6 +487,7 @@ class StationaryWaveProblem:
             U,V,T must have dimensions (sigma_half, lat, lon) or (sigma_half, lat) for a zonal basic state.
             W must have dimensions (sigma_full, lat, lon) or (sigma_full, lat) for a zonal basic state.
         """
+        input_data = self._preprocess_input_sigma_data(input_data)
         # Get coordinate values
         phi, theta = self.dist.local_grids(self.full_basis)
         lat_deg = (np.pi / 2 - theta + 0*phi) * 180 / np.pi 
@@ -505,8 +530,9 @@ class StationaryWaveProblem:
         Initialize the basic state fields from input data that are defined on arbitrary pressure levels.
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_basic_state_from_sigma_data.
-        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
-        both lat and lon must be increasing, and lon must span -180 to 180.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+        lat must range from –90 to +90 inclusive.
+        lon must be included for non-zonal basic states and must range from –180 to +180 inclusive.
         pressure must be in hPa (to match most reanalysis datasets).
 
         Parameters
@@ -518,11 +544,7 @@ class StationaryWaveProblem:
             SP must have dimensions (lat, lon) or (lat,) for a zonal basic state.
             U,V,W,T must have dimensions (pressure, lat, lon) or (pressure, lat) for a zonal basic state.
         """
-        # Make sure pressure levels are increasing
-        if input_data.pressure[0] > input_data.pressure[1]:
-            input_data = input_data.reindex({'pressure':list(reversed(input_data['pressure']))})
-
-        input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
+        input_data = self._preprocess_input_pressure_data(input_data)
         input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_half,sig,y),
                                              input_data.sigma,
                                              input_data[['U','V','T']],
@@ -546,8 +568,8 @@ class StationaryWaveProblem:
     def initialize_forcings_from_sigma_data(self,input_data):
         """
         Initialize the forcing fields from input data that are defined on the same sigma levels as the model.
-        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
-        both lat and lon must be increasing, and lon must span -180 to 180.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+        lat must range from –90 to +90 inclusive and lon must range from –180 to +180 inclusive.
 
         Parameters
         ----------
@@ -559,6 +581,8 @@ class StationaryWaveProblem:
             EMFD_U is the eddy divergence of zonal momentum flux in m/s^2 and must have dimensions (sigma_half, lat, lon).
             EMFD_V is the eddy divergence of meridional momentum flux in m/s^2 and must have dimensions (sigma_half, lat, lon).
         """
+        input_data = self._preprocess_input_sigma_data(input_data)
+
         # Get coordinate values
         phi, theta = self.dist.local_grids(self.full_basis)
         lat_deg = (np.pi / 2 - theta + 0*phi) * 180 / np.pi 
@@ -588,8 +612,8 @@ class StationaryWaveProblem:
         Initialize the forcing fields from input data that are defined on arbitrary pressure levels.
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_forcings_from_sigma_data.
-        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid;
-        both lat and lon must be increasing, and lon must span -180 to 180.
+        The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
+        lat must range from –90 to +90 inclusive and lon must range from –180 to +180 inclusive.
         pressure must be in hPa (to match most reanalysis datasets).
 
         Parameters
@@ -604,11 +628,7 @@ class StationaryWaveProblem:
             EMFD_U is the eddy divergence of zonal momentum flux in m/s^2 and must have dimensions (pressure, lat, lon).
             EMFD_V is the eddy divergence of meridional momentum flux in m/s^2 and must have dimensions (pressure, lat, lon).
         """
-        # Make sure pressure levels are increasing
-        if input_data.pressure[0] > input_data.pressure[1]:
-            input_data = input_data.reindex({'pressure':list(reversed(input_data['pressure']))})
-
-        input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
+        input_data = self._preprocess_input_pressure_data(input_data)
         input_data_halflevs = xr.apply_ufunc(lambda sig,y : np.interp(self.sigma_half,sig,y),
                                              input_data.sigma,
                                              input_data[['QDIAB','EHFD','EMFD_U','EMFD_V']],

@@ -65,6 +65,7 @@ class StationaryWaveProblem:
     initializes the basic state and forcing fields, and integrates the problem.
     """
     def __init__(self, resolution, sigma_full, linear, zonal_basic_state, output_dir, case_name, 
+                 remove_zonal_mean = True,
                  hyperdiffusion_coefficient=1e17, 
                  rayleigh_damping_timescale=25, 
                  newtonian_cooling_timescale=15
@@ -86,14 +87,19 @@ class StationaryWaveProblem:
             Directory where output files will be saved.
         case_name : str
             Name of the run, used to name output files.
-        hyperdiffusion_coefficient : float
-            Hyperdiffusion coefficient in m^4/s (default: 1e17).
-        rayleigh_damping_timescale : float or array-like; default: 25
+        remove_zonal_mean : bool, optional
+            Whether to remove the zonal mean from the forcing fields and damp zonal-mean of perturbation fields. 
+            Default: True.
+        hyperdiffusion_coefficient : float, optional
+            Hyperdiffusion coefficient in m^4/s. Default: 1e17.
+        rayleigh_damping_timescale : float or array-like, optional
             Rayleigh damping timescale in days. If one value is passed, it is applied uniformly in the vertical.
             Otherwise, must be an array of size Nsigma listing values from the topmost to the bottom-most levels.
-        newtonian_cooling_timescale : float or array-like; default: 15
+            Default: 25.
+        newtonian_cooling_timescale : float or array-like, optional
             Newtonian cooling timescale in days. If one value is passed, it is applied uniformly in the vertical.
-            Otherwise, must be an array of size Nsigma listing values from the topmost to the bottom-most levels.            
+            Otherwise, must be an array of size Nsigma listing values from the topmost to the bottom-most levels.   
+            Default: 15.         
         """
         self.resolution = resolution
 
@@ -107,6 +113,7 @@ class StationaryWaveProblem:
         self.hyperdiffusion_coefficient = hyperdiffusion_coefficient * meter**4 / second
         self.output_dir = output_dir
         self.case_name = case_name
+        self.remove_zonal_mean = remove_zonal_mean
 
         rayleigh_damping_timescale = np.array(rayleigh_damping_timescale)
         if len(rayleigh_damping_timescale.shape) == 0: # one float/int value was passed
@@ -431,21 +438,21 @@ class StationaryWaveProblem:
             
             forcing_mom = f"- grad(Phisfc) - EMFD{i}"
 
-            forcing_T = f"+ Qdiab{i} - EHFD{i}"
+            forcing_T = f"Qdiab{i} - EHFD{i}"
 
-            zonal_mean_relaxation_u = f"- self.zonalmean_relaxation_coefficient * Average(u{i},'phi') * one"
-            zonal_mean_relaxation_T = f"- self.zonalmean_relaxation_coefficient * Average(T{i},'phi') * one"
+            zonal_mean_relaxation_u = f"- self.zonalmean_relaxation_coefficient * Average(u{i},'phi') * one" if self.remove_zonal_mean else ""
+            zonal_mean_relaxation_T = f"- self.zonalmean_relaxation_coefficient * Average(T{i},'phi') * one"  if self.remove_zonal_mean else ""
 
             if self.zonal_basic_state: #All terms with non-constant coefficients from the basic state go the LHS
                 # Momentum equation
-                self.problem.add_equation(f"{LHS_mom} + {linear_terms_mom} = {zonal_mean_relaxation_u} {forcing_mom} {nonlinear_terms_mom}")
+                self.problem.add_equation(f"{LHS_mom} + {linear_terms_mom} = {forcing_mom} {zonal_mean_relaxation_u} {nonlinear_terms_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(f"{LHS_T} + {linear_terms_T} = {zonal_mean_relaxation_T} {forcing_T} {nonlinear_terms_T}")
+                self.problem.add_equation(f"{LHS_T} + {linear_terms_T} = {forcing_T} {zonal_mean_relaxation_T} {nonlinear_terms_T}")
             else:
                 # Momentum equation
-                self.problem.add_equation(f"{LHS_mom} = {zonal_mean_relaxation_u} {forcing_mom} {nonlinear_terms_mom} - {linear_terms_mom}")
+                self.problem.add_equation(f"{LHS_mom} = {forcing_mom} {zonal_mean_relaxation_u} {nonlinear_terms_mom} - {linear_terms_mom}")
                 # Thermodynamic equation
-                self.problem.add_equation(f"{LHS_T} = {zonal_mean_relaxation_T} {forcing_T} {nonlinear_terms_T} - {linear_terms_T}")
+                self.problem.add_equation(f"{LHS_T} = {forcing_T} {zonal_mean_relaxation_T} {nonlinear_terms_T} - {linear_terms_T}")
 
     def _preprocess_input_pressure_data(self,input_data):
         """Make sure pressure levels are increasing and reach high and low enough"""
@@ -596,7 +603,8 @@ class StationaryWaveProblem:
         input_data_itp = input_data.interp_like(local_grid_xr, method='linear').transpose('sigma_half','lon','lat')
 
         # Remove zonal mean from forcings
-        input_data_itp = prime(input_data_itp)
+        if self.remove_zonal_mean:
+            input_data_itp = prime(input_data_itp)
         
         # Topographic forcing
         self.vars['Phisfc']['g'] = input_data_itp.ZSFC.data * meter * consts['g'] 
@@ -797,8 +805,9 @@ class StationaryWaveProblem:
                         timestep = CFL.compute_timestep()
                     self.solver.step(timestep)
                     # Enforce zero zonal mean of lnps
-                    m, ell, *_ = self.dist.coeff_layout.local_group_arrays(self.full_basis.domain(self.dist), scales=1)
-                    self.vars['lnps']['c'][m == 0] = 0.
+                    if self.remove_zonal_mean:
+                        m, ell, *_ = self.dist.coeff_layout.local_group_arrays(self.full_basis.domain(self.dist), scales=1)
+                        self.vars['lnps']['c'][m == 0] = 0.
 
                     # Print some statistics
                     if self.solver.iteration % 20 == 0:

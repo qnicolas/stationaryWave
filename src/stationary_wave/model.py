@@ -36,7 +36,7 @@ import datetime
 
 import xarray as xr
 from pathlib import Path
-from .tools import prime
+from .tools import prime, lon_360_to_180, lon_180_to_360
 
 # Simulation units 
 # The main point is to do the calculations on a sphere of unit radius, 
@@ -460,29 +460,59 @@ class StationaryWaveProblem:
             input_data = input_data.reindex({'pressure':list(reversed(input_data['pressure']))})
 
         input_data = input_data.assign_coords(sigma=input_data.pressure/input_data.SP*100)
-        assert input_data.sigma.isel(pressure=0).max() <= self.sigma_half[0],\
-            "With this vertical grid your input data should contain pressure levels <= %.2f hPa" % (input_data.SP.min().data/100 * self.sigma_half[0])
-        assert input_data.sigma.isel(pressure=-1).min() >= self.sigma_half[-1],\
-            "With this vertical grid your input data should contain pressure levels >= %.2f hPa" % (input_data.SP.max().data/100 * self.sigma_half[-1])
+        # Warn if top/bottom extrapolation will occur. 
+        if self.dist.comm.rank == 0:
+            if input_data.sigma.isel(pressure=0).max() > self.sigma_half[0]:
+                logger.warning("For some grid points in your input data, the topmost sigma level is {:.4f}, which lies lower than the model's topmost sigma level of {:.4f}. " \
+                            "The data will be extrapolated using the nearest value".format(input_data.sigma.isel(pressure=0).max().data, self.sigma_half[0]))
+            if input_data.sigma.isel(pressure=-1).min() < self.sigma_half[-1]:
+                logger.warning("For some grid points in your input data, the bottommost sigma level is {:.4f}, which lies higher than the model's bottommost sigma level of {:.4f}. "
+                            "The data will be extrapolated using the nearest value".format(input_data.sigma.isel(pressure=-1).min().data, self.sigma_half[-1]))
         return input_data
         
     def _preprocess_input_sigma_data(self,input_data):
-        """Make sure data have the correct lat/lon ranges and ordering"""
-        for coord in ['lat','lon']:
-            if coord in input_data.coords:
-                if input_data[coord][0] > input_data[coord][1]:
-                    input_data = input_data.reindex({coord:list(reversed(input_data[coord]))})
-        assert np.isclose(input_data.lat[0], -90.) and np.isclose(input_data.lat[-1], 90.), "Input data latitude must range from -90 to +90 inclusive."
-        if 'lon' in input_data.coords:
-            assert (input_data.lon[0] <= -180.) and (input_data.lon[-1]>= 180.), "Input data longitude must range from -180 to +180 inclusive."
+        """Make sure data have the correct latitude range and add longitude points at +-180 degrees if needed"""
+        input_data = input_data.sortby(input_data['lat'])
+
+        # Check latitude range
+        _, theta = self.dist.local_grids(self.full_basis)
+        lat_max = (np.pi / 2 - theta[0,-1]) * 180 / np.pi
+        assert (input_data.lat.max()>lat_max) and input_data.lat.min()<lat_max,\
+              "Input data latitude range is too narrow. With this resolution, it must range at least from {:.2f} to {:.2f} degrees.".format(-lat_max, lat_max)
+        
+        
+        if 'lon' in input_data.dims:
+            input_data = input_data.sortby(input_data['lon'])
+            
+            # Change latitude from [0,360] to [-180,180] if needed
+            if input_data.lon.max() <= 360 and input_data.lon.min() >= 0:
+                input_data = lon_360_to_180(input_data)
+            elif input_data.lon.max() <= 180 and input_data.lon.min() >= -180:
+                pass
+            else:
+                raise ValueError("Input data longitude values must be in the range [-180,180] or [0,360].")
+            
+            # Calculate values at lon = 180 to fill in missing edge point if needed
+            empty_da_180 = xr.DataArray([0.],coords={'lon':[180.]})
+            input_data_180 = lon_180_to_360(input_data).interp_like(empty_da_180)
+
+            # Fill in missing edge points at lon = -180 and lon = 180 if needed
+            if input_data.lon.max() < 180:
+                input_data = xr.concat([input_data, input_data_180], dim='lon')
+            if input_data.lon.min() > -180:
+                input_data_180 = input_data_180.assign_coords({'lon':[-180.]})
+                input_data = xr.concat([input_data_180,input_data], dim='lon')
+
         return input_data
 
     def initialize_basic_state_from_sigma_data(self,input_data):
         """
         Initialize the basic state fields from input data that are defined on the same sigma levels as the model.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
-        lat must range from –90 to +90 inclusive.
-        lon must be included for non-zonal basic states and must range from –180 to +180 inclusive.
+        However, the function does not extrapolate outside the given latitude range: if the given latitude range
+        is too narrow, an error will be raised.
+        For non-zonal basic states, the longitude dimension ('lon') must be included and lie within [-180,180] or [0,360] degrees.
+
 
         Parameters
         ----------
@@ -538,8 +568,9 @@ class StationaryWaveProblem:
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_basic_state_from_sigma_data.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
-        lat must range from –90 to +90 inclusive.
-        lon must be included for non-zonal basic states and must range from –180 to +180 inclusive.
+        However, the function does not extrapolate outside the given latitude range: if the given latitude range
+        is too narrow, an error will be raised.
+        For non-zonal basic states, the longitude dimension ('lon') must be included and lie within [-180,180] or [0,360] degrees.
         pressure must be in hPa (to match most reanalysis datasets).
 
         Parameters
@@ -576,7 +607,9 @@ class StationaryWaveProblem:
         """
         Initialize the forcing fields from input data that are defined on the same sigma levels as the model.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
-        lat must range from –90 to +90 inclusive and lon must range from –180 to +180 inclusive.
+        However, the function does not extrapolate outside the given latitude range: if the given latitude range
+        is too narrow, an error will be raised.
+        The longitude dimension ('lon') must lie within [-180,180] or [0,360] degrees.
 
         Parameters
         ----------
@@ -595,7 +628,6 @@ class StationaryWaveProblem:
         lat_deg = (np.pi / 2 - theta + 0*phi) * 180 / np.pi 
         lon_deg = (phi-np.pi) * 180 / np.pi
 
-        assert set(input_data.dims) == {'sigma_half', 'lat', 'lon'}, "Input forcings must have dimensions {sigma_half, lat, lon}."
         assert np.allclose(input_data.sigma_half.data, self.sigma_half), "Input forcings sigma levels must match model sigma levels."
 
         local_grid_xr = xr.DataArray(np.zeros(lat_deg.shape),coords={'lon':lon_deg[:,0],'lat':lat_deg[0]},dims=['lon','lat'])
@@ -621,7 +653,9 @@ class StationaryWaveProblem:
         Typically, this is reanalysis data. This function interpolates the data to the model's sigma levels
         before calling initialize_forcings_from_sigma_data.
         The lat-lon grid of the input data can be arbitrary and will be interpolated to the model's grid.
-        lat must range from –90 to +90 inclusive and lon must range from –180 to +180 inclusive.
+        However, the function does not extrapolate outside the given latitude range: if the given latitude range
+        is too narrow, an error will be raised.
+        The longitude dimension ('lon') must lie within [-180,180] or [0,360] degrees.
         pressure must be in hPa (to match most reanalysis datasets).
 
         Parameters

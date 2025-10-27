@@ -303,6 +303,7 @@ def lon_180_to_360(da,longitude='longitude'):
     longitude : str, optional
         Name of the longitude coordinate. Default is 'longitude'; the code will also check for 'lon'.
     """
+    da = da.copy()
     try:
         da[longitude]
     except KeyError:
@@ -323,6 +324,7 @@ def lon_360_to_180(da,longitude='longitude'):
     longitude : str, optional
         Name of the longitude coordinate. Default is 'longitude'; the code will also check for 'lon'.
     """
+    da = da.copy()
     try:
         da[longitude]
     except KeyError:

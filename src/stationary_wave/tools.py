@@ -136,7 +136,7 @@ def process_sigma_sim(name,sims,data_path = DATA_PATH,avg = np.array([20,30])):
     output : xarray.DataArray
         Dataset with aimulation output + time-averaged variables
     """
-    sim = open_h5s(name,sims)
+    sim = open_h5s(name,sims,data_path)
     # Read in sigma levels
     sigma_full = np.loadtxt(data_path+f"{name}/sigma_full.txt")
     sim.attrs['sigma_full'] = sigma_full
@@ -146,6 +146,8 @@ def process_sigma_sim(name,sims,data_path = DATA_PATH,avg = np.array([20,30])):
         test = sim[var].isel(t=0,longitude=slice(1,-1))
         if np.sum(np.isnan(test.data)) == len(test.data.flatten()): # Then this variable is a basic state variable
             sim[var] = sim[var].isel(t=0,longitude=0)
+        elif var[-3:] == 'bar': # Also a basic-state variable, but zonally varying
+            sim[var] = sim[var].isel(t=0)
 
     sim_mean = sim.sel(t=slice(*(avg*24))).mean('t').transpose('','latitude','longitude','sigma','sigma_stag')
 

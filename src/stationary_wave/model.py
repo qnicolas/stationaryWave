@@ -477,7 +477,7 @@ class StationaryWaveProblem:
         # Check latitude range
         _, theta = self.dist.local_grids(self.full_basis)
         lat_max = (np.pi / 2 - theta[0,-1]) * 180 / np.pi
-        assert (input_data.lat.max()>lat_max) and input_data.lat.min()<lat_max,\
+        assert (input_data.lat.max()>=lat_max) and input_data.lat.min()<=lat_max,\
               "Input data latitude range is too narrow. With this resolution, it must range at least from {:.2f} to {:.2f} degrees.".format(-lat_max, lat_max)
         
         
@@ -816,14 +816,14 @@ class StationaryWaveProblem:
         CFL = d3.CFL(self.solver, initial_dt=timestep, cadence=20, safety=safety_CFL, min_dt = timestep, max_change = 1.5)
         # Need to add all velocities and sigmadots - not sure if worth it
         for i in range(1,self.Nsigma+1):
-            CFL.add_velocity(self.vars[f'u{i}'])
-            if not self.zonal_basic_state:
-                CFL.add_velocity(self.vars['one']*self.vars[f'ubar{i}'])
+            CFL.add_velocity(self.vars[f'ubar{i}'] + self.vars[f'u{i}'])
+            # if not self.zonal_basic_state:
+            #     CFL.add_velocity(self.vars['one']*self.vars[f'ubar{i}'])
         for i in range(1,self.Nsigma):
             sigmadot_i = eval(self._sigmadot(i,'full').replace('div','d3.div').replace('grad','d3.grad'),self.namespace)
-            CFL.add_frequency(sigmadot_i/self.deltasigma_half[i-1])
-            if not self.zonal_basic_state:
-                CFL.add_frequency(self.vars['one']*self.vars[f'sigmadotbar{i}']/self.deltasigma_half[i-1])
+            CFL.add_frequency((self.vars[f'sigmadotbar{i}'] + sigmadot_i)/self.deltasigma_half[i-1])
+            # if not self.zonal_basic_state:
+            #     CFL.add_frequency(self.vars['one']*self.vars[f'sigmadotbar{i}']/self.deltasigma_half[i-1])
 
         flow = d3.GlobalFlowProperty(self.solver, cadence=10)
         flow.add_property(self.vars[f'u{1}']@self.vars[f'u{1}'], name='u2')
